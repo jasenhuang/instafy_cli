@@ -82,6 +82,7 @@ sync 选项:
       --dry-run             只列出会新增/更新的工作流
       --force               忽略变更检测，强制重新转换覆盖
       --prune               删除远端已不存在的工作流文件
+                            （参数由节点标题 instafy:* 绑定，见 README）
 
 配置文件 ~/.instafy.json:
   { "url": "http://127.0.0.1:8188", "out": "~/instafy-outputs", "timeout": 1800,

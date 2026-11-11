@@ -44,32 +44,20 @@ export interface SyncResult {
   remoteDir: string;
 }
 
-const SAMPLERS = ["KSampler", "KSamplerAdvanced", "SamplerCustom", "SamplerCustomAdvanced", "CFGGuider"];
-const LATENT_NODES = new Set([
-  "EmptySD3LatentImage",
-  "EmptyLatentImage",
-  "EmptyFlux2LatentImage",
-  "EmptyHunyuanLatentVideo",
-  "EmptyHunyuanVideo15Latent",
-  "EmptyLTXVLatentVideo",
-  "EmptyQwenImageLayeredLatentImage",
-  "EmptyLatentVideo",
-  "WanImageToVideo",
-  "MiniMaxH3ImageToVideo",
-  "MiniMaxH3ReferenceToVideo",
-]);
 const VIDEO_SAVE_NODES = ["SaveVideo", "VHS_VideoCombine", "SaveAnimatedWEBP", "SaveAnimatedWEBM"];
 
 function isLink(value: unknown): value is [string, number] {
   return Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && typeof value[1] === "number";
 }
 
-function linkTarget(graph: PromptGraph, value: unknown): string | undefined {
-  if (!isLink(value)) return undefined;
-  return graph[value[0]] ? value[0] : undefined;
+/** Save 系节点（含视频保存）。 */
+function allSaveNodes(graph: PromptGraph): string[] {
+  return Object.keys(graph).filter(
+    (id) => graph[id].class_type.startsWith("Save") || VIDEO_SAVE_NODES.includes(graph[id].class_type),
+  );
 }
 
-/** 从输出节点向上游遍历，得到真正参与执行的节点集合。 */
+/** 从 Save 节点反向收集上游节点。 */
 function upstreamOf(graph: PromptGraph, roots: string[]): Set<string> {
   const seen = new Set<string>();
   const stack = [...roots];
@@ -84,100 +72,11 @@ function upstreamOf(graph: PromptGraph, roots: string[]): Set<string> {
   return seen;
 }
 
-function allSaveNodes(graph: PromptGraph): string[] {
-  return Object.keys(graph).filter(
-    (id) => graph[id].class_type.startsWith("Save") || VIDEO_SAVE_NODES.includes(graph[id].class_type),
-  );
-}
-
 function detectKind(graph: PromptGraph, ids: Set<string>): WorkflowKind {
   for (const id of ids) {
     if (VIDEO_SAVE_NODES.includes(graph[id].class_type)) return "video";
   }
   return "image";
-}
-
-function pickTextField(node: PromptGraph[string], want: "positive" | "negative", slot: number): string | undefined {
-  const inputs = node.inputs;
-  const str = (key: string) => (typeof inputs[key] === "string" ? key : undefined);
-
-  if (typeof inputs.negative_prompt === "string" && (want === "negative" || slot >= 1)) {
-    return "negative_prompt";
-  }
-  if (want === "positive") {
-    return str("positive_prompt") ?? str("prompt") ?? str("manual_prompt") ?? str("text");
-  }
-  if (str("negative")) return "negative";
-  if (/TextEncode/.test(node.class_type)) return str("text");
-  return undefined;
-}
-
-/** 顺着 conditioning 链往上找提示词输入；ConditioningZeroOut 说明这一路没有反向提示词。 */
-function resolveText(
-  graph: PromptGraph,
-  link: [string, number],
-  want: "positive" | "negative",
-  depth = 0,
-): Binding | undefined {
-  if (depth > 12) return undefined;
-  const [id, slot] = link;
-  const node = graph[id];
-  if (!node) return undefined;
-  if (node.class_type === "ConditioningZeroOut") return undefined;
-
-  // 文本节点直接给字面值
-  if (/PrimitiveString/.test(node.class_type) && typeof node.inputs.value === "string") return [id, "value"];
-
-  const field = pickTextField(node, want, slot);
-  if (field) return [id, field];
-
-  const inputs = node.inputs;
-  // 文本字段本身是连线时（MiniMax H3 之类把 prompt 作为输入接到 PrimitiveString）
-  const textLink = (want === "negative"
-    ? ["negative_prompt", "negative", "text"]
-    : ["prompt", "manual_prompt", "positive_prompt", "text", "global_prompt"]
-  )
-    .map((name) => inputs[name])
-    .find((value) => isLink(value));
-  if (textLink) return resolveText(graph, textLink as [string, number], want, depth + 1);
-  const follow = (names: string[]): [string, number] | undefined => {
-    for (const name of names) {
-      const target = linkTarget(graph, inputs[name]);
-      if (target) return [target, (inputs[name] as [string, number])[1]];
-    }
-    return undefined;
-  };
-
-  const next =
-    want === "positive"
-      ? follow(["positive", "conditioning", "guider", "negative"])
-      : follow(["negative", "conditioning", "guider"]);
-  return next ? resolveText(graph, next, want, depth + 1) : undefined;
-}
-
-
-function findDirectPrompt(graph: PromptGraph, ids: Set<string>): Binding | undefined {
-  const fields = ["global_prompt", "prompt", "manual_prompt", "positive_prompt", "text"];
-  let best: { binding: Binding; text: string } | undefined;
-  for (const id of ids) {
-    for (const field of fields) {
-      const value = graph[id].inputs[field];
-      if (typeof value !== "string") continue;
-      const candidate = { binding: [id, field] as Binding, text: value };
-      if (!best || candidate.text.length > best.text.length) best = candidate;
-    }
-  }
-  return best?.binding;
-}
-
-/** 采样器的 steps 可能挂在一层 sigmas 上游（如 SplitSigmas → BasicScheduler）。 */
-function resolveSteps(graph: PromptGraph, id: string, depth = 0): Binding | undefined {
-  if (depth > 3) return undefined;
-  const node = graph[id];
-  if (!node) return undefined;
-  if (typeof node.inputs.steps === "number") return [id, "steps"];
-  if (isLink(node.inputs.sigmas)) return resolveSteps(graph, (node.inputs.sigmas as [string, number])[0], depth + 1);
-  return undefined;
 }
 
 interface Guess {
@@ -195,7 +94,69 @@ interface Guess {
   warnings: string[];
 }
 
-function guessBindings(graph: PromptGraph): Guess {
+/**
+ * 参数通过节点标题声明：在 ComfyUI 里把节点 Title 设成 instafy:<参数>。
+ * 一个节点可以同时承载多个参数（如采样器的 seed/steps），标题只需标主角色。
+ */
+const PARAM_TITLES: Record<ParamKey, string> = {
+  prompt: "instafy:prompt",
+  negative: "instafy:negative",
+  image: "instafy:image",
+  width: "instafy:size",
+  height: "instafy:size",
+  seed: "instafy:seed",
+  steps: "instafy:steps",
+  fps: "instafy:fps",
+  seconds: "instafy:seconds",
+  output: "instafy:output",
+};
+
+/** 标了 instafy:<参数> 的节点上按顺序尝试的字段名（只读字面值，不跟连线）。 */
+const PARAM_FIELDS: Record<ParamKey, string[]> = {
+  prompt: ["prompt", "text", "positive_prompt", "manual_prompt", "global_prompt", "value"],
+  negative: ["negative_prompt", "negative", "text"],
+  image: ["image"],
+  width: ["width"],
+  height: ["height"],
+  seed: ["seed", "noise_seed"],
+  steps: ["steps"],
+  fps: ["fps", "frame_rate", "value"],
+  seconds: ["value", "seconds"],
+  output: ["filename_prefix"],
+};
+
+/**
+ * 一个节点只打一个标题（如采样器同时有 seed/steps），其余参数的字段从"别的标题节点"上找时，
+ * 只允许该参数专有的字段名，避免把 prompt 的 text 当成 negative、把 seconds 的 value 当成 prompt。
+ */
+const PARAM_FALLBACK_FIELDS: Partial<Record<ParamKey, string[]>> = {
+  prompt: ["prompt", "positive_prompt", "manual_prompt", "global_prompt"],
+  negative: ["negative_prompt", "negative"],
+  seed: ["seed", "noise_seed"],
+  steps: ["steps"],
+  fps: ["fps", "frame_rate"],
+  seconds: ["seconds"],
+};
+
+const BIND_PARAMS: ParamKey[] = [
+  "prompt",
+  "negative",
+  "image",
+  "width",
+  "height",
+  "seed",
+  "steps",
+  "fps",
+  "seconds",
+];
+
+function titleOf(graph: PromptGraph, id: string): string {
+  const meta = (graph[id] as { _meta?: { title?: string } })._meta;
+  return meta?.title ?? "";
+}
+
+/** 按节点标题解析绑定；不认标题的工作流不会有任何参数。 */
+function bindByTitles(graph: PromptGraph): Guess {
   const warnings: string[] = [];
   const roots = allSaveNodes(graph);
   if (roots.length === 0) warnings.push("没有找到 Save 节点，无法确定产出");
@@ -205,130 +166,59 @@ function guessBindings(graph: PromptGraph): Guess {
   const guess: Guess = { kind, warnings };
 
   if (roots.length > 0) {
-    const videoSave = roots.find((id) =>
-      VIDEO_SAVE_NODES.includes(graph[id].class_type) || graph[id].class_type.startsWith("SaveVideo"),
-    );
+    const videoSave = roots.find((id) => VIDEO_SAVE_NODES.includes(graph[id].class_type));
     const saveId = videoSave ?? roots[0];
     if (graph[saveId].class_type.startsWith("Save")) guess.output = [saveId, "filename_prefix"];
   }
 
-  const samplerIds = [...ids].filter((id) => SAMPLERS.includes(graph[id].class_type));
-  const samplerId = samplerIds.find((id) => graph[id].inputs.add_noise === "enable") ?? samplerIds[0];
+  const titled = [...ids]
+    .filter((id) => titleOf(graph, id).startsWith("instafy:"))
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
-  if (!samplerId) {
-    // 有的工作流把采样封装在自定义节点里（如 MiniMax H3 Director），直接找提示词与种子字段
-    const direct = findDirectPrompt(graph, ids);
-    if (direct) {
-      guess.positive = direct;
-    } else {
-      warnings.push("没有识别到采样器，也无法定位提示词输入");
-    }
-    const seedNode = [...ids].find(
-      (id) => typeof graph[id].inputs.seed === "number" || typeof graph[id].inputs.noise_seed === "number",
-    );
-    if (seedNode) {
-      guess.seed = [seedNode, typeof graph[seedNode].inputs.seed === "number" ? "seed" : "noise_seed"];
-    }
+  const byTitle = new Map<string, string[]>();
+  for (const id of titled) {
+    const title = titleOf(graph, id);
+    const list = byTitle.get(title) ?? [];
+    list.push(id);
+    byTitle.set(title, list);
+  }
+  for (const [title, list] of byTitle) {
+    if (list.length > 1) warnings.push(`标题 ${title} 出现在多个节点（${list.join(", ")}），只使用第一个`);
   }
 
-  const sampler = samplerId ? graph[samplerId] : undefined;
-  let positiveLink = isLink(sampler?.inputs.positive) ? (sampler.inputs.positive as [string, number]) : undefined;
-  let negativeLink = isLink(sampler?.inputs.negative) ? (sampler.inputs.negative as [string, number]) : undefined;
-
-  if (!positiveLink && isLink(sampler?.inputs.guider)) {
-    const guider = graph[(sampler.inputs.guider as [string, number])[0]];
-    if (guider) {
-      if (isLink(guider.inputs.positive)) positiveLink = guider.inputs.positive as [string, number];
-      if (isLink(guider.inputs.negative)) negativeLink = guider.inputs.negative as [string, number];
-      if (!positiveLink && isLink(guider.inputs.conditioning)) {
-        positiveLink = guider.inputs.conditioning as [string, number];
-      }
-    }
-  }
-
-  if (positiveLink) {
-    guess.positive = resolveText(graph, positiveLink, "positive");
-    if (!guess.positive) warnings.push("没有识别到正向提示词输入");
-  }
-  if (negativeLink) {
-    const negative = resolveText(graph, negativeLink, "negative");
-    if (negative && !(guess.positive && negative[0] === guess.positive[0] && negative[1] === guess.positive[1])) {
-      guess.negative = negative;
-    }
-  }
-
-  if (sampler && samplerId) {
-    if (typeof sampler.inputs.seed === "number") guess.seed = [samplerId, "seed"];
-    else if (typeof sampler.inputs.noise_seed === "number") guess.seed = [samplerId, "noise_seed"];
-    else if (isLink(sampler.inputs.noise)) {
-      const noiseId = (sampler.inputs.noise as [string, number])[0];
-      if (typeof graph[noiseId]?.inputs.noise_seed === "number") guess.seed = [noiseId, "noise_seed"];
-    }
-    guess.steps = resolveSteps(graph, samplerId);
-  }
-  if (!guess.seed) warnings.push("没有识别到随机种子输入");
-
-  for (const id of ids) {
-    const node = graph[id];
-    if (LATENT_NODES.has(node.class_type) && typeof node.inputs.width === "number" && typeof node.inputs.height === "number") {
-      guess.width = [id, "width"];
-      guess.height = [id, "height"];
-      break;
-    }
-  }
-
-  const loaders = [...ids].filter((id) => graph[id].class_type === "LoadImage");
-  if (loaders.length > 0) {
-    const feeder = [...ids].find((id) =>
-      ["start_image", "first_frame"].some((key) => {
-        const target = linkTarget(graph, graph[id].inputs[key]);
-        return target !== undefined && loaders.includes(target);
-      }),
-    );
-    const chosen = feeder
-      ? linkTarget(graph, graph[feeder].inputs.start_image ?? graph[feeder].inputs.first_frame)
-      : undefined;
-    guess.image = [chosen ?? loaders[0], "image"];
-    if (loaders.length > 1) warnings.push(`有 ${loaders.length} 个 LoadImage，只绑定了第一个`);
-  }
-
-  for (const id of ids) {
-    const node = graph[id];
-    if (node.class_type !== "CreateVideo") continue;
-    if (typeof node.inputs.fps === "number") {
-      guess.fps = [id, "fps"];
-      break;
-    }
-    if (isLink(node.inputs.fps)) {
-      const fpsId = (node.inputs.fps as [string, number])[0];
-      const source = graph[fpsId];
-      if (typeof source?.inputs.value === "number") guess.fps = [fpsId, "value"];
-      else if (typeof source?.inputs.frame_rate === "number") guess.fps = [fpsId, "frame_rate"];
-      break;
-    }
-  }
-  if (!guess.fps) {
-    const frameRate = [...ids].find((id) => typeof graph[id].inputs.frame_rate === "number");
-    if (frameRate) guess.fps = [frameRate, "frame_rate"];
-  }
-
-  // 时长：Wan / MiniMax 用数学表达式把秒数换算成帧数，秒数挂在表达式的一个输入上
-  if (guess.fps) {
-    for (const id of ids) {
-      const node = graph[id];
-      if (typeof node.inputs.length === "number" || !isLink(node.inputs.length)) continue;
-      const math = graph[(node.inputs.length as [string, number])[0]];
-      if (!math || math.class_type !== "ComfyMathExpression") continue;
-      for (const value of Object.values(math.inputs)) {
-        const target = linkTarget(graph, value);
-        if (!target || target === guess.fps[0]) continue;
-        if (typeof graph[target].inputs.value === "number") {
-          guess.seconds = [target, "value"];
-          break;
+  const bind = (param: ParamKey): void => {
+    const want = PARAM_TITLES[param];
+    const exact = titled.filter((id) => titleOf(graph, id) === want);
+    const fallbackFields = PARAM_FALLBACK_FIELDS[param];
+    const groups = fallbackFields
+      ? [exact, titled.filter((id) => titleOf(graph, id) !== want)]
+      : [exact];
+    for (const group of groups) {
+      for (const id of group) {
+        const fields = group === exact ? PARAM_FIELDS[param] : fallbackFields!;
+        for (const field of fields) {
+          const value = graph[id].inputs[field];
+          if (value === undefined || isLink(value)) continue;
+          const key = param === "prompt" ? "positive" : param;
+          (guess as unknown as Record<string, unknown>)[key] = [id, field] satisfies Binding;
+          return;
         }
       }
-      if (guess.seconds) break;
     }
+  };
+
+  for (const param of BIND_PARAMS) bind(param);
+
+  const missing = BIND_PARAMS.filter((param) => {
+    const key = param === "prompt" ? "positive" : param;
+    return (guess as unknown as Record<string, unknown>)[key] === undefined;
+  });
+  if (missing.length > 0) {
+    warnings.push(
+      titled.length > 0
+        ? `未绑定 ${missing.join("/")}（需要时给对应节点加 instafy:* 标题）`
+        : "没有声明任何 instafy:* 标题，所有参数不可用（在 ComfyUI 里给节点设置标题后重新 sync）",
+    );
   }
 
   return guess;
@@ -527,7 +417,7 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
           onWarning: (message) => warnings.push(message),
         });
         const name = tracked?.name ?? pickName(record.rel, manifest);
-        const guess = guessBindings(graph);
+        const guess = bindByTitles(graph);
         const workflow = buildWorkflow(record.rel, graph, name, guess);
 
         await fs.mkdir(path.dirname(target), { recursive: true });

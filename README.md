@@ -97,7 +97,7 @@ instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 
 ## 同步远端工作流
 
-把 ComfyUI `~/ComfyUI/user/default/workflows` 里（含子目录）的 UI 格式工作流，用 CLI 内置的转换器（`src/convert.ts`，等价于原来的 `ui2api.py`）转成 API 格式，自动推断参数绑定后写进 `workflows/`：
+把 ComfyUI `~/ComfyUI/user/default/workflows` 里（含子目录）的 UI 格式工作流，用 CLI 内置的转换器（`src/convert.ts`，等价于原来的 `ui2api.py`）转成 API 格式，按节点标题解析参数后写进 `workflows/`：
 
 ```bash
 instafy sync --dry-run      # 先看会新增/更新哪些
@@ -121,9 +121,33 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 - 每次同步先用 HTTP 列出远端工作流并算 sha1（文件不大，直接拉下来算），未变化的不重新转换。
 - 同步记录存在 `workflows/.instafy-sync.json`，记录 `远端相对路径 → 本地文件 / 工作流名 / sha1 / 同步时间`。手工新建的同名文件不会被默默覆盖（提示跳过），需要 `--force`。
 - 转换后会按 `object_info` 的默认值补齐 UI 格式里缺失的必填控件（例如 `SaveImageAdvanced` 的 `format.bit_depth`），否则 `/prompt` 会校验失败。
-- 自动推断 `prompt` / `negative` / `image` / `width` / `height` / `seed` / `steps` / `seconds` / `fps` / `output` 绑定：顺着采样器的 conditioning 链找文本节点（含 `PrimitiveString`、`MiniMaxH3ImageToVideo.prompt` 这类连线输入），按 `CreateVideo.fps` 与时长数学表达式反推秒数。推断不出来的参数不会绑定，`instafy sync` 会在 stderr 里提示，可手工编辑生成的工作流 JSON 补齐。
-- 少数工作流本身不产出文件（如 `qwen3vl_i2t` 只有 `PreviewAny`），或者采样封装在自定义节点里（`MiniMaxH3Director`），同步仍会照常写入，跑之前看一眼 bindings 是否合理。
+- **参数由节点标题声明**（见下一节）：同步时只认标题，不做图结构推断。没有标题的参数不会绑定，`instafy sync` 会在 stderr 里提示哪些参数缺失。
+- 少数工作流本身不产出文件（如 `qwen3vl_i2t` 只有 `PreviewAny`），同步仍会照常写入；`output` 取保存节点的 `filename_prefix`，没有保存节点就只出预览。
 - 转换器对动态下拉（如 `SaveVideo` 的 `format` → `format.codec`、`SaveImageAdvanced` 的 `format.bit_depth`）会按选中的选项展开子控件，并按 `object_info` 默认值补齐缺失必填项。
+
+## 参数标题约定
+
+在 ComfyUI 里给节点设置 Title，同步时按标题绑定参数（标题会随工作流存进 `_meta.title`）：
+
+| 标题 | 节点示例 | 读取字段（按顺序尝试） |
+| --- | --- | --- |
+| `instafy:prompt` | 文本编码 / `PrimitiveString` | `prompt` / `text` / `positive_prompt` / `manual_prompt` / `global_prompt` / `value` |
+| `instafy:negative` | 反向文本节点 | `negative_prompt` / `negative` / `text` |
+| `instafy:image` | `LoadImage` | `image` |
+| `instafy:size` | `EmptyLatentImage` 之类 | `width` + `height` |
+| `instafy:seed` | 采样器 / `RandomNoise` | `seed` / `noise_seed` |
+| `instafy:steps` | 采样器 / `BasicScheduler` | `steps` |
+| `instafy:fps` | `CreateVideo` / `PrimitiveFloat` | `fps` / `frame_rate` / `value` |
+| `instafy:seconds` | 喂给时长数学节点的 `PrimitiveFloat` | `value` / `seconds` |
+
+规则很简单：
+
+- 只读标题节点上的**字面值**，不跟连线；标题不存在或没有对应字段，该参数就不绑定。
+- 一个节点只能有一个标题。采样器同时有 `seed`/`steps` 时标 `instafy:seed`，`--steps` 会自动从同一节点取；`MiniMaxH3Director` 这种把 prompt/seed/fps 放在一个节点里的，标 `instafy:prompt` 即可，其余参数从同一节点找。
+- 同一节点上的 positive/negative（Qwen 的文本编码）标 `instafy:prompt`，`--negative` 会回退到同节点的 `negative_prompt` 字段。
+- 保存节点不用标，`output` 自动取；`width`/`height` 绑到 `instafy:size` 后，`instafy workflows` 里就会显示 `--width --height`。
+
+现在 `workflows/` 里 22 个工作流已经按这套约定打好标题；新增工作流时，在 ComfyUI 里给对应节点改名即可，`instafy sync` 后立即生效。
 
 ## 自定义工作流
 
@@ -148,6 +172,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 ```
 
 - `bindings` 里出现 `image` 就会被视为“需要参考图”，CLI 会先上传文件再把返回值写成 `instafy/<文件名>`。
+- 同步生成的文件，`bindings` 来自节点标题；手工写的 JSON 直接用 `bindings`，不需要标题（`instafy run/path` 不经过同步逻辑）。
 - `prompt` / `negative` / `width` / `height` / `seed` / `steps` / `seconds` / `fps` 只对声明了 binding 的参数生效，其余参数会提示“不支持，已忽略”。
 - `output` 会把保存节点的 `filename_prefix` 改成 `instafy/<工作流名>`，方便在远端输出目录里定位。
 - 图可以从 ComfyUI 网页端“导出（API 格式）”直接拿到 `graph` 部分；UI 格式的工作流用 `instafy sync` 同步即可（CLI 内置转换，会展开子图、跳过 mute/bypass 分支）。
