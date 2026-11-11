@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { ComfyClient, type PromptGraph } from "./client.js";
 import { convertWorkflow, type NodeSchema } from "./convert.js";
-import { ensureComfyReachable } from "./tunnel.js";
+import { resolveBaseUrl } from "./config.js";
 import { WORKFLOWS_DIR, type Binding, type ParamKey, type Workflow, type WorkflowKind } from "./workflows.js";
 
 const MANIFEST_FILE = ".instafy-sync.json";
@@ -24,14 +24,13 @@ interface Manifest {
 }
 
 export interface SyncOptions {
-  sshHost?: string;
+  /** 不传则按 --url / INSTAFY_COMFY_URL / ~/.instafy.json / 默认地址解析 */
   url?: string;
   /** user/default 下的相对目录，或 ~/ComfyUI/user/default/workflows 这类绝对路径 */
   dir?: string;
   dryRun?: boolean;
   force?: boolean;
   prune?: boolean;
-  noTunnel?: boolean;
 }
 
 export interface SyncResult {
@@ -457,114 +456,107 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
     remoteDir: dir,
   };
 
-  const baseUrl = opts.url ?? process.env.INSTAFY_COMFY_URL ?? "http://127.0.0.1:8188";
-  const sshHost = opts.sshHost ?? process.env.INSTAFY_SSH_HOST ?? "novel";
-  const reachable = await ensureComfyReachable(baseUrl, { sshHost, enabled: !opts.noTunnel });
-  const client = new ComfyClient(reachable.baseUrl);
+  const client = new ComfyClient(resolveBaseUrl(opts.url));
 
-  try {
-    const remotePaths = await client.listUserData(dir, true);
-    const manifest = await readManifest();
+  const remotePaths = await client.listUserData(dir, true);
+  const manifest = await readManifest();
 
-    const records: Array<{ rel: string; content: Buffer; sha1: string }> = [];
-    for (const listed of remotePaths) {
-      const rel = listed.startsWith(`${dir}/`) ? listed.slice(dir.length + 1) : listed;
-      if (!rel.endsWith(".json") || rel.split("/").some((part) => part.startsWith("."))) continue;
-      try {
-        const content = await client.readUserData(`${dir}/${rel}`);
-        records.push({ rel, content, sha1: sha1Of(content) });
-      } catch (err) {
-        result.failed.push({ rel, error: (err as Error).message });
-      }
+  const records: Array<{ rel: string; content: Buffer; sha1: string }> = [];
+  for (const listed of remotePaths) {
+    const rel = listed.startsWith(`${dir}/`) ? listed.slice(dir.length + 1) : listed;
+    if (!rel.endsWith(".json") || rel.split("/").some((part) => part.startsWith("."))) continue;
+    try {
+      const content = await client.readUserData(`${dir}/${rel}`);
+      records.push({ rel, content, sha1: sha1Of(content) });
+    } catch (err) {
+      result.failed.push({ rel, error: (err as Error).message });
     }
+  }
 
-    const pending: Array<{ rel: string; content: Buffer; sha1: string }> = [];
-    for (const record of records) {
-      const tracked = manifest.entries[record.rel];
-      const localFile = tracked ? path.join(WORKFLOWS_DIR, tracked.file) : undefined;
-      const exists = localFile ? await fileExists(localFile) : false;
+  const pending: Array<{ rel: string; content: Buffer; sha1: string }> = [];
+  for (const record of records) {
+    const tracked = manifest.entries[record.rel];
+    const localFile = tracked ? path.join(WORKFLOWS_DIR, tracked.file) : undefined;
+    const exists = localFile ? await fileExists(localFile) : false;
 
-      if (tracked && exists && tracked.sha1 === record.sha1 && tracked.file === targetFile(record.rel) && !opts.force) {
-        result.unchanged.push(record.rel);
-      } else {
-        pending.push(record);
-      }
+    if (tracked && exists && tracked.sha1 === record.sha1 && tracked.file === targetFile(record.rel) && !opts.force) {
+      result.unchanged.push(record.rel);
+    } else {
+      pending.push(record);
     }
+  }
 
-    if (opts.prune) {
-      const remoteRels = new Set(records.map((record) => record.rel));
-      for (const [rel, entry] of Object.entries(manifest.entries)) {
-        if (remoteRels.has(rel)) continue;
-        result.pruned.push(rel);
-        if (opts.dryRun) continue;
-        const target = path.join(WORKFLOWS_DIR, entry.file);
-        if (await fileExists(target)) await fs.unlink(target);
-        await pruneEmptyDirs(path.dirname(target));
-        delete manifest.entries[rel];
-      }
+  if (opts.prune) {
+    const remoteRels = new Set(records.map((record) => record.rel));
+    for (const [rel, entry] of Object.entries(manifest.entries)) {
+      if (remoteRels.has(rel)) continue;
+      result.pruned.push(rel);
+      if (opts.dryRun) continue;
+      const target = path.join(WORKFLOWS_DIR, entry.file);
+      if (await fileExists(target)) await fs.unlink(target);
+      await pruneEmptyDirs(path.dirname(target));
+      delete manifest.entries[rel];
     }
+  }
+
+  for (const record of pending) {
+    (manifest.entries[record.rel] ? result.updated : result.added).push(record.rel);
+  }
+  if (opts.dryRun) return result;
+
+  if (pending.length > 0) {
+    const objectInfo = await client.objectInfo();
+    const lookup = (classType: string): NodeSchema | undefined => objectInfo[classType];
 
     for (const record of pending) {
-      (manifest.entries[record.rel] ? result.updated : result.added).push(record.rel);
-    }
-    if (opts.dryRun) return result;
+      const tracked = manifest.entries[record.rel];
+      const file = targetFile(record.rel);
+      const target = path.join(WORKFLOWS_DIR, file);
 
-    if (pending.length > 0) {
-      const objectInfo = await client.objectInfo();
-      const lookup = (classType: string): NodeSchema | undefined => objectInfo[classType];
+      if (!tracked && (await fileExists(target)) && !opts.force) {
+        result.skipped.push(record.rel);
+        process.stderr.write(`  ${record.rel}: 本地已有 ${file} 且不受同步管理，跳过（--force 可覆盖）\n`);
+        continue;
+      }
 
-      for (const record of pending) {
-        const tracked = manifest.entries[record.rel];
-        const file = targetFile(record.rel);
-        const target = path.join(WORKFLOWS_DIR, file);
+      try {
+        const warnings: string[] = [];
+        const parsed = JSON.parse(record.content.toString("utf8")) as unknown;
+        const graph = convertWorkflow(parsed, lookup, {
+          objectInfo,
+          onWarning: (message) => warnings.push(message),
+        });
+        const name = tracked?.name ?? pickName(record.rel, manifest);
+        const guess = guessBindings(graph);
+        const workflow = buildWorkflow(record.rel, graph, name, guess);
 
-        if (!tracked && (await fileExists(target)) && !opts.force) {
-          result.skipped.push(record.rel);
-          process.stderr.write(`  ${record.rel}: 本地已有 ${file} 且不受同步管理，跳过（--force 可覆盖）\n`);
-          continue;
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        await fs.writeFile(target, JSON.stringify(workflow, null, 2) + "\n");
+
+        // 旧版本按文件名平铺，路径变了就清掉旧文件
+        if (tracked && tracked.file !== file) {
+          const stale = path.join(WORKFLOWS_DIR, tracked.file);
+          if (await fileExists(stale)) await fs.unlink(stale);
         }
 
-        try {
-          const warnings: string[] = [];
-          const parsed = JSON.parse(record.content.toString("utf8")) as unknown;
-          const graph = convertWorkflow(parsed, lookup, {
-            objectInfo,
-            onWarning: (message) => warnings.push(message),
-          });
-          const name = tracked?.name ?? pickName(record.rel, manifest);
-          const guess = guessBindings(graph);
-          const workflow = buildWorkflow(record.rel, graph, name, guess);
+        manifest.entries[record.rel] = { file, name, sha1: record.sha1, syncedAt: new Date().toISOString() };
 
-          await fs.mkdir(path.dirname(target), { recursive: true });
-          await fs.writeFile(target, JSON.stringify(workflow, null, 2) + "\n");
-
-          // 旧版本按文件名平铺，路径变了就清掉旧文件
-          if (tracked && tracked.file !== file) {
-            const stale = path.join(WORKFLOWS_DIR, tracked.file);
-            if (await fileExists(stale)) await fs.unlink(stale);
-          }
-
-          manifest.entries[record.rel] = { file, name, sha1: record.sha1, syncedAt: new Date().toISOString() };
-
-          for (const warning of [...warnings, ...guess.warnings]) {
-            process.stderr.write(`  ${record.rel}: ${warning}\n`);
-          }
-          if (!guess.positive) {
-            process.stderr.write(`  ${record.rel}: 未识别到提示词输入，需手动编辑 bindings\n`);
-          }
-        } catch (err) {
-          result.failed.push({ rel: record.rel, error: (err as Error).message });
+        for (const warning of [...warnings, ...guess.warnings]) {
+          process.stderr.write(`  ${record.rel}: ${warning}\n`);
         }
+        if (!guess.positive) {
+          process.stderr.write(`  ${record.rel}: 未识别到提示词输入，需手动编辑 bindings\n`);
+        }
+      } catch (err) {
+        result.failed.push({ rel: record.rel, error: (err as Error).message });
       }
     }
-
-    const failedRels = new Set(result.failed.map((item) => item.rel));
-    result.added = result.added.filter((rel) => !failedRels.has(rel));
-    result.updated = result.updated.filter((rel) => !failedRels.has(rel));
-
-    await writeManifest(manifest);
-    return result;
-  } finally {
-    reachable.stop();
   }
+
+  const failedRels = new Set(result.failed.map((item) => item.rel));
+  result.added = result.added.filter((rel) => !failedRels.has(rel));
+  result.updated = result.updated.filter((rel) => !failedRels.has(rel));
+
+  await writeManifest(manifest);
+  return result;
 }

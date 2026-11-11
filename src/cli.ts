@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { ComfyClient, ComfyError, collectOutputs } from "./client.js";
 import { syncWorkflows } from "./sync.js";
-import { ensureComfyReachable } from "./tunnel.js";
+import { DEFAULT_URL, loadConfig, resolveBaseUrl, resolveOutDir, resolveTimeout } from "./config.js";
 import {
   buildGraph,
   loadBuiltinWorkflows,
@@ -17,7 +17,7 @@ import {
 
 class UsageError extends Error {}
 
-const BOOLEAN_FLAGS = new Set(["help", "json", "no-tunnel", "dry-run", "force", "prune"]);
+const BOOLEAN_FLAGS = new Set(["help", "json", "dry-run", "force", "prune"]);
 const ALIASES: Record<string, string> = {
   p: "prompt",
   r: "ref",
@@ -33,14 +33,12 @@ interface Options {
   positional: string[];
   json?: boolean;
   help?: boolean;
-  noTunnel?: boolean;
   prompt?: string;
   ref?: string;
   negative?: string;
   workflow?: string;
   out?: string;
   url?: string;
-  ssh?: string;
   width?: number;
   height?: number;
   seed?: number;
@@ -54,14 +52,14 @@ interface Options {
   prune?: boolean;
 }
 
-const HELP = `instafy — 调用 novel 机器上的 ComfyUI 生成图片 / 视频
+const HELP = `instafy — 调用 ComfyUI 生成图片 / 视频
 
 用法:
   instafy image [选项] [提示词]     生成图片
   instafy video [选项] [提示词]     生成视频
   instafy run <工作流> [选项]       指定工作流生成（名称或相对路径）
   instafy workflows                列出可用工作流
-  instafy sync [选项]              同步远端 ComfyUI 工作流并转成 API 格式
+  instafy sync [选项]              同步 ComfyUI 工作流并转成 API 格式
 
 选项:
   -p, --prompt <文本>       提示词（也可直接放在命令后面）
@@ -72,11 +70,9 @@ const HELP = `instafy — 调用 novel 机器上的 ComfyUI 生成图片 / 视�
       --seed <整数>         随机种子（默认随机）
       --steps <整数>        采样步数
       --seconds <秒>        视频时长    --fps <帧率>     视频帧率
-  -o, --out <目录>          输出目录（默认 ./outputs）
-      --timeout <秒>        等待上限（默认 1800）
-      --url <地址>          ComfyUI 地址（默认 http://127.0.0.1:8188）
-      --ssh <主机>          SSH 主机（默认 novel，本地连不上时自动建隧道）
-      --no-tunnel           不自动建 SSH 隧道
+  -o, --out <目录>          输出目录（默认 ./outputs，可由配置指定）
+      --timeout <秒>        等待上限（默认 1800，可由配置指定）
+      --url <地址>          ComfyUI 地址（默认 ~/.instafy.json，否则 ${DEFAULT_URL}）
       --json                以 JSON 打印结果
   -h, --help                显示帮助
 
@@ -87,9 +83,12 @@ sync 选项:
       --force               忽略变更检测，强制重新转换覆盖
       --prune               删除远端已不存在的工作流文件
 
+配置文件 ~/.instafy.json:
+  { "url": "http://127.0.0.1:8188", "out": "~/instafy-outputs", "timeout": 1800 }
+  只写需要的字段；命令行参数优先于配置。
+
 环境变量:
-  INSTAFY_COMFY_URL   ComfyUI 地址
-  INSTAFY_SSH_HOST    SSH 主机
+  INSTAFY_COMFY_URL   ComfyUI 地址（优先级高于配置文件）
 
 示例:
   instafy image "一只戴墨镜的橘猫，棚拍质感"
@@ -124,7 +123,6 @@ function parseArgs(argv: string[]): Options {
       if (inlineValue !== undefined) throw new UsageError(`--${name} 不接受取值`);
       if (name === "help") opts.help = true;
       else if (name === "json") opts.json = true;
-      else if (name === "no-tunnel") opts.noTunnel = true;
       else if (name === "dry-run") opts.dryRun = true;
       else if (name === "force") opts.force = true;
       else if (name === "prune") opts.prune = true;
@@ -218,65 +216,57 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
   };
   warnUnsupported(workflow, params);
 
-  const baseUrl = opts.url ?? process.env.INSTAFY_COMFY_URL ?? "http://127.0.0.1:8188";
-  const sshHost = opts.ssh ?? process.env.INSTAFY_SSH_HOST ?? "novel";
-  const reachable = await ensureComfyReachable(baseUrl, { sshHost, enabled: !opts.noTunnel });
-  const client = new ComfyClient(reachable.baseUrl);
+  const config = loadConfig();
+  const client = new ComfyClient(resolveBaseUrl(opts.url, process.env, config));
 
-  try {
-    if (opts.ref) {
-      log(`上传参考图 ${opts.ref} …`);
-      params.image = await client.uploadImage(opts.ref);
-    }
+  if (opts.ref) {
+    log(`上传参考图 ${opts.ref} …`);
+    params.image = await client.uploadImage(opts.ref);
+  }
 
-    const graph = buildGraph(workflow, params);
-    const promptId = await client.queue(graph);
-    log(`已提交 ${workflow.name}，任务 ${promptId}，种子 ${seed}`);
+  const graph = buildGraph(workflow, params);
+  const promptId = await client.queue(graph);
+  log(`已提交 ${workflow.name}，任务 ${promptId}，种子 ${seed}`);
 
-    const { entry, elapsedMs } = await client.wait(promptId, {
-      timeoutMs: (opts.timeout ?? 1800) * 1000,
-      intervalMs: 15_000,
-      onTick: (elapsed) => log(`等待中… 已用 ${humanDuration(elapsed)}`),
-    });
+  const { entry, elapsedMs } = await client.wait(promptId, {
+    timeoutMs: resolveTimeout(opts.timeout, config) * 1000,
+    intervalMs: 15_000,
+    onTick: (elapsed) => log(`等待中… 已用 ${humanDuration(elapsed)}`),
+  });
 
-    const refs = collectOutputs(entry);
-    const outDir = path.resolve(opts.out ?? "outputs");
-    await fs.mkdir(outDir, { recursive: true });
+  const refs = collectOutputs(entry);
+  const outDir = resolveOutDir(opts.out, config);
+  await fs.mkdir(outDir, { recursive: true });
 
-    const files: string[] = [];
-    for (const ref of refs) {
-      const target = await uniqueTarget(outDir, ref.filename);
-      await client.download(ref, target);
-      files.push(target);
-    }
-    if (files.length === 0) throw new ComfyError("任务完成但没有产出文件，请检查工作流的 Save 节点");
+  const files: string[] = [];
+  for (const ref of refs) {
+    const target = await uniqueTarget(outDir, ref.filename);
+    await client.download(ref, target);
+    files.push(target);
+  }
+  if (files.length === 0) throw new ComfyError("任务完成但没有产出文件，请检查工作流的 Save 节点");
 
-    if (opts.json) {
-      process.stdout.write(
-        JSON.stringify(
-          { workflow: workflow.name, kind: mode, promptId, seed, elapsedSeconds: elapsedMs / 1000, files },
-          null,
-          2,
-        ) + "\n",
-      );
-    } else {
-      log(`完成，用时 ${humanDuration(elapsedMs)}`);
-      for (const file of files) process.stdout.write(file + "\n");
-    }
-  } finally {
-    reachable.stop();
+  if (opts.json) {
+    process.stdout.write(
+      JSON.stringify(
+        { workflow: workflow.name, kind: mode, promptId, seed, elapsedSeconds: elapsedMs / 1000, files },
+        null,
+        2,
+      ) + "\n",
+    );
+  } else {
+    log(`完成，用时 ${humanDuration(elapsedMs)}`);
+    for (const file of files) process.stdout.write(file + "\n");
   }
 }
 
 async function runSync(opts: Options): Promise<void> {
   const result = await syncWorkflows({
-    sshHost: opts.ssh,
     url: opts.url,
     dir: opts.dir,
     dryRun: opts.dryRun,
     force: opts.force,
     prune: opts.prune,
-    noTunnel: opts.noTunnel,
   });
 
   if (opts.json) {
@@ -300,19 +290,36 @@ async function runSync(opts: Options): Promise<void> {
 async function listWorkflows(): Promise<void> {
   const workflows = loadBuiltinWorkflows();
   if (workflows.size === 0) {
-    log("workflows/ 目录下没有工作流");
+    log("workflows/ 目录下没有工作流，先运行 instafy sync");
     return;
   }
+
+  const groups = new Map<string, Workflow[]>();
   for (const workflow of [...workflows.values()].sort((a, b) => a.name.localeCompare(b.name))) {
-    const needRef = workflow.bindings.image ? "需要 --ref" : "无需参考图";
-    const params = supportedParams(workflow)
-      .filter((p) => p !== "prompt" && p !== "image")
-      .map((p) => `--${p}`)
-      .join(" ");
-    process.stdout.write(
-      `${workflow.name.padEnd(22)} ${workflow.kind.padEnd(6)} ${needRef}  ${workflow.description ?? ""}\n` +
-        `${"".padEnd(29)}可调: ${params || "—"}\n`,
-    );
+    const rel = workflow.source ?? `${workflow.name}.json`;
+    const parts = rel.split("/");
+    const group = parts.length > 1 ? parts.slice(0, -1).join("/") : "（根目录）";
+    const list = groups.get(group) ?? [];
+    list.push(workflow);
+    groups.set(group, list);
+  }
+
+  const names = [...workflows.values()].map((workflow) => workflow.name);
+  const nameWidth = Math.max(16, ...names.map((name) => name.length));
+  const paramOrder: ParamKey[] = ["negative", "width", "height", "seconds", "fps", "steps", "seed"];
+
+  process.stdout.write(`共 ${workflows.size} 个工作流（ref = 需要 --ref）\n`);
+  for (const [group, list] of [...groups.entries()].sort((a, b) =>
+    a[0] === "（根目录）" ? -1 : b[0] === "（根目录）" ? 1 : a[0].localeCompare(b[0]),
+  )) {
+    process.stdout.write(`\n${group}\n`);
+    for (const workflow of list) {
+      const params = paramOrder.filter((key) => workflow.bindings[key]);
+      const flags = params.map((key) => `--${key}`).join(" ");
+      const ref = workflow.bindings.image ? "ref" : "-";
+      const line = `  ${workflow.name.padEnd(nameWidth)}  ${workflow.kind.padEnd(6)}${ref.padEnd(4)}${flags}`;
+      process.stdout.write(`${line.trimEnd()}\n`);
+    }
   }
 }
 

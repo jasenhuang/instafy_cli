@@ -2,13 +2,13 @@
 
 调用 `novel` 机器上 ComfyUI 服务的命令行工具：给一段提示词（可选参考图、指定工作流），拿到图片或视频。
 
-ComfyUI 只监听 `novel` 上的 `127.0.0.1:8188`，所以 CLI 先尝试直连本地地址，连不上就自动用 `ssh novel` 建一个本地端口转发，任务结束后自动关闭。
+默认连 `http://127.0.0.1:8188`，也可以把地址写进 `~/.instafy.json`，或用 `--url` / `INSTAFY_COMFY_URL` 临时覆盖。默认地址不是本机时请把 ComfyUI 监听在可访问地址上，或自己先做端口转发。
 
 ## 依赖
 
 - Node.js ≥ 20（用到内置 `fetch` / `FormData`）
-- 本机能免密 `ssh novel`（隧道默认走这个别名，可用 `--ssh` 或 `INSTAFY_SSH_HOST` 改）
-- 远端 ComfyUI 已启动（`~/start_comfyui.sh`）；`sync` 通过 HTTP API 读取工作流，不再需要远端 Python 转换脚本
+- 能访问 ComfyUI 的 HTTP 地址（默认 `http://127.0.0.1:8188`，可用 `~/.instafy.json` 或 `--url` 改）
+- `sync` 通过 HTTP API 读取工作流，不需要远端 Python 转换脚本
 
 ## 安装
 
@@ -27,8 +27,8 @@ instafy image "一只戴墨镜的橘猫，棚拍质感"
 instafy image --ref ./me.jpg "把背景换成东京夜景，保留人物姿态"
 instafy video --prompt "海边日落，镜头缓慢推进" --seconds 5
 instafy video --ref ./start.png "人物慢慢转头看向镜头" --width 640 --height 640
-instafy workflows            # 列出内置 + 已同步的工作流及可调参数
-instafy run z-image-turbo -p "雪夜小木屋" --steps 6 --json
+instafy workflows            # 按远端目录列出工作流及可调参数
+instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 ```
 
 生成结果默认存到 `./outputs/`（`-o/--out` 可改），成功时 stdout 每行一个文件路径，进度日志走 stderr。
@@ -45,31 +45,48 @@ instafy run z-image-turbo -p "雪夜小木屋" --steps 6 --json
 | `--seed` | 随机种子，默认随机并打印出来 |
 | `--steps` | 采样步数（图像工作流） |
 | `--seconds` / `--fps` | 仅视频：时长与帧率，帧数 = seconds × fps + 1 |
-| `--timeout <秒>` | 等待上限，默认 1800 |
-| `--url <地址>` | ComfyUI 地址，默认 `http://127.0.0.1:8188` |
-| `--ssh <主机>` / `--no-tunnel` | 控制自动 SSH 隧道 |
+| `--timeout <秒>` | 等待上限，默认 1800（可配置） |
+| `--url <地址>` | ComfyUI 地址，默认 `http://127.0.0.1:8188`（可配置） |
 | `--json` | 输出 JSON（工作流、prompt_id、种子、耗时、文件列表） |
 
-环境变量：`INSTAFY_COMFY_URL`、`INSTAFY_SSH_HOST`。
+### 配置
 
-## 内置工作流
+`~/.instafy.json` 可以放默认值，只写需要的字段：
 
-| 名称 | 类型 | 说明 | 需要参考图 |
+```json
+{
+  "url": "http://127.0.0.1:8188",
+  "out": "~/instafy-outputs",
+  "timeout": 1800
+}
+```
+
+| 字段 | 说明 | 默认 | 命令行覆盖 |
 | --- | --- | --- | --- |
-| `z-image-turbo` | image | Z-Image Turbo，8 步文生图，默认 1024×1024 | 否 |
-| `flux2-klein-edit` | image | Flux.2 Klein 9B 蒸馏版改图，4 步，输出尺寸跟随参考图 | 是 |
-| `wan2.2-t2v` | video | Wan 2.2 14B 文生视频，lightning 4 步 LoRA，默认 640×640 / 5 秒 | 否 |
-| `wan2.2-i2v` | video | Wan 2.2 14B 图生视频，lightning 4 步 LoRA，默认 640×640 / 5 秒 | 是 |
+| `url` | ComfyUI 地址 | `http://127.0.0.1:8188` | `--url`（另有 `INSTAFY_COMFY_URL`，优先级高于配置） |
+| `out` | 输出目录，支持 `~` 开头 | `./outputs` | `--out` |
+| `timeout` | 等待上限（秒） | `1800` | `--timeout` |
 
-不带 `--workflow` 时按模式自动选择：图片不带参考图 → `z-image-turbo`，带参考图 → `flux2-klein-edit`；视频同理 `wan2.2-t2v` / `wan2.2-i2v`。
+规则：命令行 > 配置 > 默认。配置文件不存在就用全部默认值；JSON 不合法、字段类型不对或地址格式错误会直接报错，并在错误里带上配置文件路径，不会静默回退。
 
-执行 `instafy sync` 后，远端同步来的工作流也会一起出现在 `instafy workflows` 里，用法相同（`--workflow <名称>`）。
+## 默认工作流
 
-实测（A30 24G，模型已缓存时）：文生图约 10 秒，改图约 10 秒，2 秒 480×480 视频约 25 秒～3 分钟（首次要加载 14B 模型，会慢一些）。
+工作流全部来自 `instafy sync`（远端 `~/ComfyUI/user/default/workflows`）。不带 `--workflow` 时按类型自动挑一个：
+
+| 场景 | 默认工作流 | 可调参数 |
+| --- | --- | --- |
+| 文生图 | `zimage_turbo_t2i` | `--negative --steps --seed` |
+| 改图（带 `--ref`） | `flux2_klein_i2i` | `--steps --seed` |
+| 文生视频 | `wan2_2_14B_t2v` | `--negative --width --height --seconds --fps --seed` |
+| 图生视频（带 `--ref`） | `wan2_2_14B_i2v` | `--negative --seconds --fps --seed` |
+
+这几个只是按名称优先挑的；远端改名/删除后会自动退到同类型（且是否要参考图一致）里按名称排序的第一个。想固定用哪个就加 `--workflow`。`instafy workflows` 里 `ref` 列标 `ref` 的工作流必须用 `--ref` 传参考图。
+
+实测（A30 24G，模型已缓存时）：文生图约 9 秒，改图约 20 秒，2 秒 480×480 视频约 25 秒。
 
 ## 同步远端工作流
 
-把 novel 上 `~/ComfyUI/user/default/workflows` 里（含子目录）的 UI 格式工作流，用 CLI 内置的转换器（`src/convert.ts`，等价于原来的 `ui2api.py`）转成 API 格式，自动推断参数绑定后写进 `workflows/`：
+把 ComfyUI `~/ComfyUI/user/default/workflows` 里（含子目录）的 UI 格式工作流，用 CLI 内置的转换器（`src/convert.ts`，等价于原来的 `ui2api.py`）转成 API 格式，自动推断参数绑定后写进 `workflows/`：
 
 ```bash
 instafy sync --dry-run      # 先看会新增/更新哪些
@@ -87,8 +104,8 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 
 机制说明：
 
-- **目录结构原样保留**：远端 `flux/xxx.json` 同步到 `workflows/flux/xxx.json`，`minimax_h3/`、`wan/` 等子目录一一对应；内置的 4 个工作流仍在 `workflows/` 根目录。工作流名默认取文件名，跨目录重名时自动加父目录前缀，也可以用相对路径（`wan/wan2_2_14B_t2v`）指定。
-- **转换发生在 `instafy sync` 时，由 CLI 自己完成**：通过 ComfyUI 的 HTTP 接口 `GET /api/userdata?dir=workflows&recurse=true` 递归列文件、`GET /api/userdata/<path>` 读内容，再拉一次 `/object_info` 拿节点 schema，在本地把 UI 格式（子图、mute/bypass、widgets 位置映射）展开成 `/prompt` 的 API 格式。不再依赖服务器上的 Python 脚本，也不需要 `ssh python3`。
+- **目录结构原样保留**：远端 `flux/xxx.json` 同步到 `workflows/flux/xxx.json`，`minimax_h3/`、`wan/` 等子目录一一对应，`workflows/` 根目录也可以直接放自己的 JSON。工作流名默认取文件名，跨目录重名时自动加父目录前缀，也可以用相对路径（`wan/wan2_2_14B_t2v`）指定。
+- **转换发生在 `instafy sync` 时，由 CLI 自己完成**：通过 ComfyUI 的 HTTP 接口 `GET /api/userdata?dir=workflows&recurse=true` 递归列文件、`GET /api/userdata/<path>` 读内容，再拉一次 `/object_info` 拿节点 schema，在本地把 UI 格式（子图、mute/bypass、widgets 位置映射）展开成 `/prompt` 的 API 格式。不再依赖服务器上的 Python 脚本。
 - 本地存下来的已经是 API 格式（`graph` 字段），运行 `instafy image/video` 时不再做任何格式转换；远端本来就是 API 格式的文件会原样保留。
 - 每次同步先用 HTTP 列出远端工作流并算 sha1（文件不大，直接拉下来算），未变化的不重新转换。
 - 同步记录存在 `workflows/.instafy-sync.json`，记录 `远端相对路径 → 本地文件 / 工作流名 / sha1 / 同步时间`。手工新建的同名文件不会被默默覆盖（提示跳过），需要 `--force`。
@@ -122,13 +139,13 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 - `bindings` 里出现 `image` 就会被视为“需要参考图”，CLI 会先上传文件再把返回值写成 `instafy/<文件名>`。
 - `prompt` / `negative` / `width` / `height` / `seed` / `steps` / `seconds` / `fps` 只对声明了 binding 的参数生效，其余参数会提示“不支持，已忽略”。
 - `output` 会把保存节点的 `filename_prefix` 改成 `instafy/<工作流名>`，方便在远端输出目录里定位。
-- 图可以从 ComfyUI 网页端“导出（API 格式）”直接拿到 `graph` 部分；UI 格式的工作流用 `instafy sync` 同步即可（CLI 内置转换，会展开子图、跳过 mute/bypass 分支）。内置的四个工作流来自官方模板，同样是走同一套转换逻辑生成的。
+- 图可以从 ComfyUI 网页端“导出（API 格式）”直接拿到 `graph` 部分；UI 格式的工作流用 `instafy sync` 同步即可（CLI 内置转换，会展开子图、跳过 mute/bypass 分支）。
 
 改完工作流文件直接生效，不需要重新编译；只有改 TypeScript 源码才需要 `pnpm build`。
 
 ## 常见问题
 
-- **提示连不上、又没配 SSH 主机**：手动 `ssh -N -L 8188:127.0.0.1:8188 novel`，或加 `--ssh <主机>`。
-- **`--ref` 不生效**：所选工作流没有 `image` binding，例如 `z-image-turbo` 只支持文生图。
+- **提示连不上**：先确认 ComfyUI 在跑（`curl http://127.0.0.1:8188/system_stats`）；地址不对就改 `~/.instafy.json`，或用 `--url` 临时指定。
+- **`--ref` 不生效**：所选工作流没有 `image` binding，例如 `zimage_turbo_t2i` 只支持文生图。
 - **视频尺寸报错**：宽高需要是 16 的倍数；`--seconds` 与 `--fps` 决定帧数，帧数需要满足 `4n+1`（工作流里的数学节点已处理，改 fps 时注意）。
 - **首次跑某个视频工作流很慢**：14B 双模型要从磁盘加载并换入显存，后续任务会快很多。
