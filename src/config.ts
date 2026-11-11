@@ -6,12 +6,25 @@ export const DEFAULT_URL = "http://127.0.0.1:8188";
 /** 用户配置：{ "url": "...", "out": "...", "timeout": 1800 } */
 export const CONFIG_FILE = path.join(os.homedir(), ".instafy.json");
 
+export interface DefaultWorkflows {
+  /** 文生图（无 --ref） */
+  image?: string;
+  /** 改图（带 --ref） */
+  imageRef?: string;
+  /** 文生视频（无 --ref） */
+  video?: string;
+  /** 图生视频（带 --ref） */
+  videoRef?: string;
+}
+
 export interface InstafyConfig {
   url?: string;
   /** 默认输出目录，支持 ~ 开头 */
   out?: string;
   /** 默认等待上限（秒） */
   timeout?: number;
+  /** 默认工作流，未设置时用内置优先级 */
+  defaults?: DefaultWorkflows;
 }
 
 function invalid(file: string, detail: string): Error {
@@ -37,7 +50,7 @@ export function loadConfig(file = CONFIG_FILE): InstafyConfig {
     throw invalid(file, "内容应为 JSON 对象");
   }
 
-  const { url, out, timeout } = parsed as Record<string, unknown>;
+  const { url, out, timeout, defaults } = parsed as Record<string, unknown>;
   const config: InstafyConfig = {};
 
   if (url !== undefined) {
@@ -61,6 +74,22 @@ export function loadConfig(file = CONFIG_FILE): InstafyConfig {
       throw invalid(file, "的 timeout 应为正数（秒）");
     }
     config.timeout = timeout;
+  }
+
+  if (defaults !== undefined) {
+    if (defaults === null || typeof defaults !== "object" || Array.isArray(defaults)) {
+      throw invalid(file, "的 defaults 应为 JSON 对象");
+    }
+    const picked: DefaultWorkflows = {};
+    for (const key of ["image", "imageRef", "video", "videoRef"] as const) {
+      const value = (defaults as Record<string, unknown>)[key];
+      if (value === undefined) continue;
+      if (typeof value !== "string" || value.trim() === "") {
+        throw invalid(file, `的 defaults.${key} 应为非空字符串`);
+      }
+      picked[key] = value.trim();
+    }
+    config.defaults = picked;
   }
 
   return config;

@@ -88,7 +88,13 @@ export function findWorkflow(spec: string): Workflow | undefined {
   return byName.get(spec) ?? byPath.get(spec.replace(/\.json$/i, ""));
 }
 
-export function resolveWorkflow(spec: string | undefined, kind: WorkflowKind | undefined, hasRef: boolean): Workflow {
+export function resolveWorkflow(
+  spec: string | undefined,
+  kind: WorkflowKind | undefined,
+  hasRef: boolean,
+  overrides?: DefaultWorkflowNames,
+  warn?: (message: string) => void,
+): Workflow {
   const builtins = loadBuiltinWorkflows();
 
   if (spec) {
@@ -102,19 +108,42 @@ export function resolveWorkflow(spec: string | undefined, kind: WorkflowKind | u
 
   if (!kind) throw new Error("未指定模式，无法选择默认工作流");
 
-  return pickDefault(kind, hasRef, builtins);
+  return pickDefault(kind, hasRef, builtins, overrides, warn);
 }
 
-/** 不带 --workflow 时的默认工作流：优先用同名同步结果，找不到再按类型兜底。 */
+export interface DefaultWorkflowNames {
+  image?: string;
+  imageRef?: string;
+  video?: string;
+  videoRef?: string;
+}
+
+/** 不带 --workflow 时的内置优先级（~/.instafy.json 的 defaults 会插到最前面）。 */
 const DEFAULT_PREFERENCES: Record<string, string[]> = {
-  "image:plain": ["zimage_turbo_t2i", "flux2_klein_t2i", "flux1_dev_t2i", "qwen_image_2_1_t2i"],
-  "image:ref": ["flux2_klein_i2i", "qwen_image_2_1_image_edit"],
+  "image:plain": ["qwen_image_2_1_t2i", "zimage_turbo_t2i", "flux2_klein_t2i", "flux1_dev_t2i"],
+  "image:ref": ["qwen_image_2_1_image_edit", "flux2_klein_i2i"],
   "video:plain": ["wan2_2_14B_t2v", "ltx-2b-t2v", "minimax_h3_director_turbo"],
-  "video:ref": ["wan2_2_14B_i2v", "minimax_h3_i2v"],
+  "video:ref": ["minimax_h3_i2v", "minimax_h3_r2v", "wan2_2_14B_i2v", "minimax_h3_i2v_uncensored"],
 };
 
-function pickDefault(kind: WorkflowKind, hasRef: boolean, workflows: Map<string, Workflow>): Workflow {
+function pickDefault(
+  kind: WorkflowKind,
+  hasRef: boolean,
+  workflows: Map<string, Workflow>,
+  overrides?: DefaultWorkflowNames,
+  warn?: (message: string) => void,
+): Workflow {
   const key = `${kind}:${hasRef ? "ref" : "plain"}`;
+  const slot = (hasRef ? `${kind}Ref` : kind) as keyof DefaultWorkflowNames;
+  const preferred = overrides?.[slot];
+  if (preferred) {
+    const workflow = workflows.get(preferred);
+    if (workflow && workflow.kind === kind && Boolean(workflow.bindings.image) === hasRef) return workflow;
+    warn?.(
+      `配置的默认工作流 ${preferred} ${workflow ? "与当前场景（类型 / 是否带参考图）不匹配" : "不存在"}，改用内置默认`,
+    );
+  }
+
   for (const name of DEFAULT_PREFERENCES[key] ?? []) {
     const workflow = workflows.get(name);
     if (workflow && workflow.kind === kind && Boolean(workflow.bindings.image) === hasRef) return workflow;

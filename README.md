@@ -57,7 +57,13 @@ instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 {
   "url": "http://127.0.0.1:8188",
   "out": "~/instafy-outputs",
-  "timeout": 1800
+  "timeout": 1800,
+  "defaults": {
+    "image": "qwen_image_2_1_t2i",
+    "imageRef": "qwen_image_2_1_image_edit",
+    "video": "wan2_2_14B_t2v",
+    "videoRef": "minimax_h3_i2v"
+  }
 }
 ```
 
@@ -66,6 +72,9 @@ instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 | `url` | ComfyUI 地址 | `http://127.0.0.1:8188` | `--url`（另有 `INSTAFY_COMFY_URL`，优先级高于配置） |
 | `out` | 输出目录，支持 `~` 开头 | `./outputs` | `--out` |
 | `timeout` | 等待上限（秒） | `1800` | `--timeout` |
+| `defaults` | 默认工作流，见下方 | 见「默认工作流」 | `--workflow` |
+
+`defaults` 的四个键对应四种场景：`image`（无 `--ref`）、`imageRef`（带 `--ref`）、`video`、`videoRef`。配置的名字如果不存在，或者跟场景对不上（比如把需要参考图的工作流配到 `image`），会在 stderr 提示一句然后退回内置默认，不会卡住。
 
 规则：命令行 > 配置 > 默认。配置文件不存在就用全部默认值；JSON 不合法、字段类型不对或地址格式错误会直接报错，并在错误里带上配置文件路径，不会静默回退。
 
@@ -75,14 +84,16 @@ instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 
 | 场景 | 默认工作流 | 可调参数 |
 | --- | --- | --- |
-| 文生图 | `zimage_turbo_t2i` | `--negative --steps --seed` |
-| 改图（带 `--ref`） | `flux2_klein_i2i` | `--steps --seed` |
+| 文生图 | `qwen_image_2_1_t2i` | `--negative --steps --seed` |
+| 改图（带 `--ref`） | `qwen_image_2_1_image_edit` | `--negative --steps --seed` |
 | 文生视频 | `wan2_2_14B_t2v` | `--negative --width --height --seconds --fps --seed` |
-| 图生视频（带 `--ref`） | `wan2_2_14B_i2v` | `--negative --seconds --fps --seed` |
+| 图生视频（带 `--ref`） | `minimax_h3_i2v` | `--seconds --fps --steps --seed` |
 
-这几个只是按名称优先挑的；远端改名/删除后会自动退到同类型（且是否要参考图一致）里按名称排序的第一个。想固定用哪个就加 `--workflow`。`instafy workflows` 里 `ref` 列标 `ref` 的工作流必须用 `--ref` 传参考图。
+`minimax_h3` 系列里没有纯文生视频（`regenerate_2k` 要求输入视频），所以无 `--ref` 的视频仍用 Wan 2.2；带 `--ref` 想改用 `minimax_h3_r2v`（参考图生视频）可以在配置里写 `"videoRef": "minimax_h3_r2v"`。
 
-实测（A30 24G，模型已缓存时）：文生图约 9 秒，改图约 20 秒，2 秒 480×480 视频约 25 秒。
+这几个只是按名称优先挑的；远端改名/删除后会自动退到同类型（且是否要参考图一致）里按名称排序的第一个。想固定用哪个就加 `--workflow`，或在 `~/.instafy.json` 的 `defaults` 里改。`instafy workflows` 里 `ref` 列标 `ref` 的工作流必须用 `--ref` 传参考图。
+
+实测（A30 24G）：Qwen 文生图约 1.5 分钟，改图约 40 秒；Wan 2.2 的 2 秒 480×480 视频约 25 秒；MiniMax H3 的 2 秒视频约 6 分钟（模型很重，首次还要加载）。
 
 ## 同步远端工作流
 

@@ -84,7 +84,9 @@ sync 选项:
       --prune               删除远端已不存在的工作流文件
 
 配置文件 ~/.instafy.json:
-  { "url": "http://127.0.0.1:8188", "out": "~/instafy-outputs", "timeout": 1800 }
+  { "url": "http://127.0.0.1:8188", "out": "~/instafy-outputs", "timeout": 1800,
+    "defaults": { "image": "qwen_image_2_1_t2i", "imageRef": "flux2_klein_i2i",
+                  "video": "wan2_2_14B_t2v", "videoRef": "minimax_h3_i2v" } }
   只写需要的字段；命令行参数优先于配置。
 
 环境变量:
@@ -189,7 +191,8 @@ function warnUnsupported(workflow: Workflow, params: Params): void {
 
 async function generate(kind: WorkflowKind | undefined, opts: Options, workflowSpec?: string): Promise<void> {
   const prompt = opts.prompt ?? opts.positional[0];
-  const workflow = resolveWorkflow(workflowSpec ?? opts.workflow, kind, Boolean(opts.ref));
+  const config = loadConfig();
+  const workflow = resolveWorkflow(workflowSpec ?? opts.workflow, kind, Boolean(opts.ref), config.defaults, log);
   const mode = kind ?? workflow.kind;
 
   if (kind && workflow.kind !== kind) {
@@ -216,7 +219,6 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
   };
   warnUnsupported(workflow, params);
 
-  const config = loadConfig();
   const client = new ComfyClient(resolveBaseUrl(opts.url, process.env, config));
 
   if (opts.ref) {
