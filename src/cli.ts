@@ -199,7 +199,9 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
     throw new UsageError(`工作流 ${workflow.name} 是 ${workflow.kind} 类型，不能用 ${kind} 模式跑`);
   }
   if (workflow.bindings.image && !opts.ref) {
-    throw new UsageError(`工作流 ${workflow.name} 需要参考图，请加 --ref <图片>`);
+    throw new UsageError(
+      `工作流 ${workflow.name} 需要参考图，请加 --ref <图片>；想跑纯文生视频可加 --workflow wan2_2_14B_t2v`,
+    );
   }
   if (!prompt && !opts.ref) {
     throw new UsageError("请提供提示词（--prompt 或直接跟在命令后面），或用 --ref 提供参考图");

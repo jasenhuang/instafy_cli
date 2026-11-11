@@ -122,7 +122,7 @@ export interface DefaultWorkflowNames {
 const DEFAULT_PREFERENCES: Record<string, string[]> = {
   "image:plain": ["qwen_image_2_1_t2i", "zimage_turbo_t2i", "flux2_klein_t2i", "flux1_dev_t2i"],
   "image:ref": ["qwen_image_2_1_image_edit", "flux2_klein_i2i"],
-  "video:plain": ["wan2_2_14B_t2v", "ltx-2b-t2v", "minimax_h3_director_turbo"],
+  "video:plain": ["minimax_h3_i2v", "wan2_2_14B_t2v", "ltx-2b-t2v", "minimax_h3_director_turbo"],
   "video:ref": ["minimax_h3_i2v", "minimax_h3_r2v", "wan2_2_14B_i2v", "minimax_h3_i2v_uncensored"],
 };
 
@@ -138,15 +138,13 @@ function pickDefault(
   const preferred = overrides?.[slot];
   if (preferred) {
     const workflow = workflows.get(preferred);
-    if (workflow && workflow.kind === kind && Boolean(workflow.bindings.image) === hasRef) return workflow;
-    warn?.(
-      `配置的默认工作流 ${preferred} ${workflow ? "与当前场景（类型 / 是否带参考图）不匹配" : "不存在"}，改用内置默认`,
-    );
+    if (workflow && workflow.kind === kind) return workflow;
+    warn?.(`配置的默认工作流 ${preferred} ${workflow ? "类型不对" : "不存在"}，改用内置默认`);
   }
 
   for (const name of DEFAULT_PREFERENCES[key] ?? []) {
     const workflow = workflows.get(name);
-    if (workflow && workflow.kind === kind && Boolean(workflow.bindings.image) === hasRef) return workflow;
+    if (workflow && workflow.kind === kind) return workflow;
   }
   const fallback = [...workflows.values()]
     .filter((workflow) => workflow.kind === kind && Boolean(workflow.bindings.image) === hasRef)
