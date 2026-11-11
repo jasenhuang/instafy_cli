@@ -1,0 +1,27 @@
+{
+  "name": "instafy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "调用 novel 机器上 ComfyUI 服务的命令行生成工具",
+  "type": "module",
+  "bin": {
+    "instafy": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "workflows"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
