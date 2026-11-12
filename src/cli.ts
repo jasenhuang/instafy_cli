@@ -235,7 +235,8 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
     throw new UsageError("请提供提示词（--prompt 或直接跟在命令后面），或用 --ref 提供参考图");
   }
 
-  const seed = opts.seed ?? Math.floor(Math.random() * 2 ** 32);
+  // seed 不传时只在工作流支持 seed 的情况下随机生成；不支持就不塞，避免误报
+  const seed = opts.seed ?? (workflow.bindings.seed ? Math.floor(Math.random() * 2 ** 32) : undefined);
   const params: Params = {
     prompt,
     negative: opts.negative,
@@ -264,7 +265,7 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
     dropImageSlots(graph, workflow, unusedSlots, (type) => Object.keys(info[type]?.input?.required ?? {}));
   }
   const promptId = await client.queue(graph);
-  log(`已提交 ${workflow.name}，任务 ${promptId}，种子 ${seed}`);
+  log(`已提交 ${workflow.name}，任务 ${promptId}${seed === undefined ? "" : `，种子 ${seed}`}`);
 
   const { entry, elapsedMs } = await client.wait(promptId, {
     timeoutMs: resolveTimeout(opts.timeout, config) * 1000,
