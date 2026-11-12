@@ -86,7 +86,7 @@ instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 | 场景 | 默认工作流 | 可调参数 |
 | --- | --- | --- |
 | 文生图 | `qwen_image_2_1_t2i` | `--negative --steps --seed` |
-| 改图（带 `--ref`） | `qwen_image_2_1_image_edit` | `--negative --width --height --steps --seed`（最多 4 张参考图） |
+| 改图（带 `--ref`） | `qwen_image_2_1_image_edit` | `--negative --width --height --steps --seed`（最多 10 张参考图） |
 | 视频 | `minimax_h3_i2v`（需 `--ref`） | `--seconds --fps --steps --seed` |
 
 `minimax_h3_i2v` 需要参考图：不带 `--ref` 时 CLI 会直接提示“需要参考图”，不会退到 Wan。想在无参考图时跑纯文生视频，用 `--workflow wan2_2_14B_t2v`（或把 `defaults.video` 改成它）。想用 `minimax_h3_r2v`（参考图生视频）把 `defaults.videoRef` 改成 `"minimax_h3_r2v"`。

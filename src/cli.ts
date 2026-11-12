@@ -349,7 +349,7 @@ async function listWorkflows(): Promise<void> {
       const flags = params.map((key) => `--${key}`).join(" ");
       const slotCount = imageSlots(workflow).length;
       const ref = slotCount === 0 ? "-" : slotCount === 1 ? "ref" : `ref×${slotCount}`;
-      const line = `  ${workflow.name.padEnd(nameWidth)}  ${workflow.kind.padEnd(6)}${ref.padEnd(6)}${flags}`;
+      const line = `  ${workflow.name.padEnd(nameWidth)}  ${workflow.kind.padEnd(6)}${ref.padEnd(8)}${flags}`;
       process.stdout.write(`${line.trimEnd()}\n`);
     }
   }
