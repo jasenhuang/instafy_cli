@@ -39,7 +39,7 @@ instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 | 参数 | 说明 |
 | --- | --- |
 | `-p, --prompt <文本>` | 提示词，也可以直接跟在 `image` / `video` 后面 |
-| `-r, --ref <文件>` | 参考图 / 首帧图，可重复传多张（顺序对应工作流声明的 `image1..image10`），自动上传到 `input/instafy/` |
+| `-r, --ref <文件>` | 参考图 / 首帧图，可重复传多张（顺序对应工作流声明的 `image1..image10`），自动上传到 `input/instafy/`；没传到的槽位会连同对应 `LoadImage` 一起剪掉，不会回退到工作流里的默认图 |
 | `-n, --negative <文本>` | 反向提示词（部分工作流支持，如 Wan 视频、Z-Image） |
 | `-w, --workflow <名称\|路径>` | 工作流名称（如 `zimage_turbo_t2i`）、相对路径（如 `wan/wan2_2_14B_t2v`），或 JSON 文件路径 |
 | `--width` / `--height` | 输出尺寸；视频要求 16 的倍数 |
@@ -145,7 +145,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 - 只读标题节点上的**字面值**，不跟连线；标题不存在或没有对应字段，该参数就不绑定。
 - 一个节点只能有一个标题。采样器同时有 `seed`/`steps` 时标 `instafy:seed`，`--steps` 会自动从同一节点取；`MiniMaxH3Director` 这种把 prompt/seed/fps 放在一个节点里的，标 `instafy:prompt` 即可，其余参数从同一节点找。
 - 同一节点上的 positive/negative（Qwen 的文本编码）标 `instafy:prompt`，`--negative` 会回退到同节点的 `negative_prompt` 字段。
-- 需要多张参考图时，按 `instafy:image1`、`instafy:image2`… 给多个 `LoadImage` 打标题，`--ref` 按这个顺序依次填入（最多 10 张）。工作流实际支持几张，取决于它自己有几个图片输入：比如 `qwen_image_2_1_image_edit` 已经接了 4 张，`instafy workflows` 会显示 `ref×4`。
+- 需要多张参考图时，按 `instafy:image1`、`instafy:image2`… 给多个 `LoadImage` 打标题，`--ref` 按这个顺序依次填入（最多 10 张）；传得比声明的少时，多出来的槽位在提交前直接删除，不会带默认图进去。工作流实际支持几张，取决于它自己有几个图片输入：比如 `qwen_image_2_1_image_edit` 已经接了 4 张，`instafy workflows` 会显示 `ref×4`。
 - 保存节点不用标，`output` 自动取；`width`/`height` 绑到 `instafy:size` 后，`instafy workflows` 里就会显示 `--width --height`。
 
 现在 `workflows/` 里 22 个工作流已经按这套约定打好标题；新增工作流时，在 ComfyUI 里给对应节点改名即可，`instafy sync` 后立即生效。

@@ -6,6 +6,7 @@ import { syncWorkflows } from "./sync.js";
 import { DEFAULT_URL, loadConfig, resolveBaseUrl, resolveOutDir, resolveTimeout } from "./config.js";
 import {
   buildGraph,
+  dropImageSlots,
   imageSlots,
   loadBuiltinWorkflows,
   resolveWorkflow,
@@ -256,6 +257,8 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
   }
 
   const graph = buildGraph(workflow, params);
+  // 没传的参考图槽位直接剪掉，工作流里的 LoadImage 不保留默认图
+  dropImageSlots(graph, workflow, slots.slice(refImages.length));
   const promptId = await client.queue(graph);
   log(`已提交 ${workflow.name}，任务 ${promptId}，种子 ${seed}`);
 

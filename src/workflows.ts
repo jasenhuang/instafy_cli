@@ -211,6 +211,22 @@ export function buildGraph(workflow: Workflow, params: Params): PromptGraph {
   return graph;
 }
 
+/** 没传参考图的槽位：删掉对应 LoadImage 及其连线，避免默认图参与推理 */
+export function dropImageSlots(graph: PromptGraph, workflow: Workflow, keys: ParamKey[]): void {
+  for (const key of keys) {
+    const binding = workflow.bindings[key];
+    if (!binding) continue;
+    const nodeId = binding[0];
+    if (!graph[nodeId]) continue;
+    for (const node of Object.values(graph)) {
+      for (const [input, value] of Object.entries(node.inputs)) {
+        if (Array.isArray(value) && value.length === 2 && value[0] === nodeId) delete node.inputs[input];
+      }
+    }
+    delete graph[nodeId];
+  }
+}
+
 export function supportedParams(workflow: Workflow): ParamKey[] {
   return (Object.keys(workflow.bindings) as ParamKey[]).filter((k) => k !== "output");
 }
