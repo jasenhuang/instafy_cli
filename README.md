@@ -145,7 +145,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 - 只读标题节点上的**字面值**，不跟连线；标题不存在或没有对应字段，该参数就不绑定。
 - 一个节点只能有一个标题。采样器同时有 `seed`/`steps` 时标 `instafy:seed`，`--steps` 会自动从同一节点取；`MiniMaxH3Director` 这种把 prompt/seed/fps 放在一个节点里的，标 `instafy:prompt` 即可，其余参数从同一节点找。
 - 同一节点上的 positive/negative（Qwen 的文本编码）标 `instafy:prompt`，`--negative` 会回退到同节点的 `negative_prompt` 字段。
-- 需要多张参考图时，按 `instafy:image1`、`instafy:image2`… 给多个 `LoadImage` 打标题，`--ref` 按这个顺序依次填入（最多 10 张）；传得比声明的少时，多出来的槽位在提交前直接删除，不会带默认图进去。工作流实际支持几张，取决于它自己有几个图片输入：比如 `qwen_image_2_1_image_edit` 已经接了 4 张，`instafy workflows` 会显示 `ref×4`。
+- 需要多张参考图时，按 `instafy:image1`、`instafy:image2`… 给多个 `LoadImage` 打标题，`--ref` 按这个顺序依次填入（最多 10 张）；传得比声明的少时，多出来的槽位在提交前直接删除，不会带默认图进去；因删节点而缺少必填输入的后续节点也会一并清掉（例如 Flux2 的第二个参考图分支）。工作流实际支持几张，取决于它自己有几个图片输入：比如 `qwen_image_2_1_image_edit` 已经接了 4 张，`instafy workflows` 会显示 `ref×4`。
 - 保存节点不用标，`output` 自动取；`width`/`height` 绑到 `instafy:size` 后，`instafy workflows` 里就会显示 `--width --height`。
 
 现在 `workflows/` 里 22 个工作流已经按这套约定打好标题；新增工作流时，在 ComfyUI 里给对应节点改名即可，`instafy sync` 后立即生效。

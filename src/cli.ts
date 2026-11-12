@@ -257,8 +257,12 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
   }
 
   const graph = buildGraph(workflow, params);
-  // 没传的参考图槽位直接剪掉，工作流里的 LoadImage 不保留默认图
-  dropImageSlots(graph, workflow, slots.slice(refImages.length));
+  // 没传的参考图槽位直接剪掉；被牵连缺必填输入的节点也一起清掉
+  const unusedSlots = slots.slice(refImages.length);
+  if (unusedSlots.length > 0) {
+    const info = await client.objectInfo();
+    dropImageSlots(graph, workflow, unusedSlots, (type) => Object.keys(info[type]?.input?.required ?? {}));
+  }
   const promptId = await client.queue(graph);
   log(`已提交 ${workflow.name}，任务 ${promptId}，种子 ${seed}`);
 

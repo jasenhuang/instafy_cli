@@ -211,19 +211,39 @@ export function buildGraph(workflow: Workflow, params: Params): PromptGraph {
   return graph;
 }
 
-/** 没传参考图的槽位：删掉对应 LoadImage 及其连线，避免默认图参与推理 */
-export function dropImageSlots(graph: PromptGraph, workflow: Workflow, keys: ParamKey[]): void {
+/** 没传参考图的槽位：删掉对应 LoadImage，并把因此缺少必填输入的节点一并清掉 */
+export function dropImageSlots(
+  graph: PromptGraph,
+  workflow: Workflow,
+  keys: ParamKey[],
+  requiredFields: (classType: string) => string[],
+): void {
+  const doomed = new Set<string>();
   for (const key of keys) {
     const binding = workflow.bindings[key];
-    if (!binding) continue;
-    const nodeId = binding[0];
-    if (!graph[nodeId]) continue;
-    for (const node of Object.values(graph)) {
-      for (const [input, value] of Object.entries(node.inputs)) {
-        if (Array.isArray(value) && value.length === 2 && value[0] === nodeId) delete node.inputs[input];
+    if (binding) doomed.add(binding[0]);
+  }
+  const queue = [...doomed];
+  while (queue.length > 0) {
+    const nodeId = queue.pop()!;
+    const node = graph[nodeId];
+    if (!node) continue;
+    delete graph[nodeId];
+
+    for (const other of Object.values(graph)) {
+      for (const [input, value] of Object.entries(other.inputs)) {
+        if (Array.isArray(value) && value.length === 2 && value[0] === nodeId) delete other.inputs[input];
       }
     }
-    delete graph[nodeId];
+
+    for (const [id, other] of Object.entries(graph)) {
+      if (doomed.has(id)) continue;
+      const missing = requiredFields(other.class_type).some((field) => other.inputs[field] === undefined);
+      if (missing) {
+        doomed.add(id);
+        queue.push(id);
+      }
+    }
   }
 }
 
