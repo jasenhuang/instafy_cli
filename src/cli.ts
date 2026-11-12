@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs/promises";
 import path from "node:path";
-import { ComfyClient, ComfyError, collectOutputs } from "./client.js";
+import { ComfyClient, ComfyError, assertSuccess, collectOutputs, type HistoryEntry, type QueueState } from "./client.js";
 import { syncWorkflows } from "./sync.js";
 import { DEFAULT_URL, loadConfig, resolveBaseUrl, resolveOutDir, resolveTimeout } from "./config.js";
 import {
@@ -19,7 +19,7 @@ import {
 
 class UsageError extends Error {}
 
-const BOOLEAN_FLAGS = new Set(["help", "json", "dry-run", "force", "prune"]);
+const BOOLEAN_FLAGS = new Set(["help", "json", "dry-run", "force", "prune", "async", "wait"]);
 const ALIASES: Record<string, string> = {
   p: "prompt",
   r: "ref",
@@ -27,6 +27,7 @@ const ALIASES: Record<string, string> = {
   w: "workflow",
   o: "out",
   h: "help",
+  a: "async",
 };
 const NUMBER_KEYS = new Set(["width", "height", "seed", "steps", "seconds", "fps", "timeout"]);
 
@@ -53,6 +54,8 @@ interface Options {
   dryRun?: boolean;
   force?: boolean;
   prune?: boolean;
+  async?: boolean;
+  wait?: boolean;
 }
 
 const HELP = `instafy — 调用 ComfyUI 生成图片 / 视频
@@ -62,6 +65,7 @@ const HELP = `instafy — 调用 ComfyUI 生成图片 / 视频
   instafy video [选项] [提示词]     生成视频
   instafy run <工作流> [选项]       指定工作流生成（名称或相对路径）
   instafy workflows                列出可用工作流
+  instafy status <任务id> [--wait]  按 prompt_id 查询进度（--wait 等完成并下载结果）
   instafy sync [选项]              同步 ComfyUI 工作流并转成 API 格式
 
 选项:
@@ -76,8 +80,14 @@ const HELP = `instafy — 调用 ComfyUI 生成图片 / 视频
   -o, --out <目录>          输出目录（默认 ./outputs，可由配置指定）
       --timeout <秒>        等待上限（默认 1800，可由配置指定）
       --url <地址>          ComfyUI 地址（默认 ~/.instafy.json，否则 ${DEFAULT_URL}）
+  -a, --async               提交后立即返回任务 id，不等结果
       --json                以 JSON 打印结果
   -h, --help                显示帮助
+
+status 选项:
+      --wait                轮询直到完成（超时按 --timeout），完成后自动下载
+      --timeout <秒>        仅 --wait：等待上限
+  -o, --out <目录>          仅 --wait：结果下载目录
 
 sync 选项:
       --dir <相对目录>      user/default 下的目录，默认 workflows
@@ -101,6 +111,9 @@ sync 选项:
   instafy image --ref ./me.jpg "换成东京夜景背景"
   instafy video --prompt "海边日落，镜头缓慢推进" --seconds 5
   instafy video --ref ./start.png "人物慢慢转头看向镜头"
+  instafy video -p "海边日落" -a            # 提交即返回任务 id
+  instafy status 3f1c0d2e                 # 查一次进度
+  instafy status 3f1c0d2e --wait          # 轮询到底并下载结果
 `;
 
 function parseArgs(argv: string[]): Options {
@@ -132,6 +145,8 @@ function parseArgs(argv: string[]): Options {
       else if (name === "dry-run") opts.dryRun = true;
       else if (name === "force") opts.force = true;
       else if (name === "prune") opts.prune = true;
+      else if (name === "async") opts.async = true;
+      else if (name === "wait") opts.wait = true;
       continue;
     }
 
@@ -208,6 +223,54 @@ function warnUnsupported(workflow: Workflow, params: Params): void {
   }
 }
 
+async function downloadOutputs(
+  client: ComfyClient,
+  entry: HistoryEntry,
+  outDir: string,
+  skipExisting = false,
+): Promise<string[]> {
+  const refs = collectOutputs(entry);
+  await fs.mkdir(outDir, { recursive: true });
+  const files: string[] = [];
+  for (const ref of refs) {
+    // status 对同一个 prompt_id 可能被反复调用，已下载过的不再重复拉取
+    const existing = path.join(outDir, ref.filename);
+    if (skipExisting && (await fs.stat(existing).then(() => true, () => false))) {
+      files.push(existing);
+      continue;
+    }
+    const target = await uniqueTarget(outDir, ref.filename);
+    await client.download(ref, target);
+    files.push(target);
+  }
+  return files;
+}
+
+function emitDone(promptId: string, files: string[], opts: Options, elapsedMs?: number): void {
+  if (opts.json) {
+    process.stdout.write(
+      JSON.stringify(
+        { promptId, status: "done", ...(elapsedMs === undefined ? {} : { elapsedSeconds: elapsedMs / 1000 }), files },
+        null,
+        2,
+      ) + "\n",
+    );
+    return;
+  }
+  if (elapsedMs !== undefined) log(`完成，用时 ${humanDuration(elapsedMs)}`);
+  if (files.length === 0) {
+    log(`任务 ${promptId} 已完成，但没有产出文件`);
+    return;
+  }
+  for (const file of files) process.stdout.write(file + "\n");
+}
+
+function describeQueue(state: QueueState): string {
+  if (state.state === "running") return "执行中";
+  if (state.state === "pending") return `排队中（第 ${state.position} 位）`;
+  return "不在队列中";
+}
+
 async function generate(kind: WorkflowKind | undefined, opts: Options, workflowSpec?: string): Promise<void> {
   const prompt = opts.prompt ?? opts.positional[0];
   const refImages = opts.refs ?? [];
@@ -267,36 +330,72 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
   const promptId = await client.queue(graph);
   log(`已提交 ${workflow.name}，任务 ${promptId}${seed === undefined ? "" : `，种子 ${seed}`}`);
 
+  if (opts.async) {
+    log(`--async：不等结果，用 instafy status ${promptId} 查询并下载`);
+    if (opts.json) {
+      process.stdout.write(
+        JSON.stringify({ workflow: workflow.name, kind: mode, promptId, seed, status: "queued" }, null, 2) + "\n",
+      );
+    } else {
+      process.stdout.write(promptId + "\n");
+    }
+    return;
+  }
+
   const { entry, elapsedMs } = await client.wait(promptId, {
     timeoutMs: resolveTimeout(opts.timeout, config) * 1000,
     intervalMs: 15_000,
     onTick: (elapsed) => log(`等待中… 已用 ${humanDuration(elapsed)}`),
   });
 
-  const refs = collectOutputs(entry);
-  const outDir = resolveOutDir(opts.out, config);
-  await fs.mkdir(outDir, { recursive: true });
-
-  const files: string[] = [];
-  for (const ref of refs) {
-    const target = await uniqueTarget(outDir, ref.filename);
-    await client.download(ref, target);
-    files.push(target);
-  }
+  const files = await downloadOutputs(client, entry, resolveOutDir(opts.out, config));
   if (files.length === 0) throw new ComfyError("任务完成但没有产出文件，请检查工作流的 Save 节点");
+  emitDone(promptId, files, opts, elapsedMs);
+}
 
-  if (opts.json) {
-    process.stdout.write(
-      JSON.stringify(
-        { workflow: workflow.name, kind: mode, promptId, seed, elapsedSeconds: elapsedMs / 1000, files },
-        null,
-        2,
-      ) + "\n",
-    );
-  } else {
-    log(`完成，用时 ${humanDuration(elapsedMs)}`);
-    for (const file of files) process.stdout.write(file + "\n");
+async function reportStatus(opts: Options): Promise<void> {
+  const promptId = opts.positional[0];
+  if (!promptId) throw new UsageError("用法: instafy status <任务id> [--wait] [-o 目录] [--json]");
+
+  const config = loadConfig();
+  const client = new ComfyClient(resolveBaseUrl(opts.url, process.env, config));
+  const outDir = resolveOutDir(opts.out, config);
+
+  // 历史里有记录 = 已结束（成功或失败）
+  const entry = await client.history(promptId);
+  if (entry) {
+    await assertSuccess(entry);
+    emitDone(promptId, await downloadOutputs(client, entry, outDir, true), opts);
+    return;
   }
+
+  const queueState = await client.queueState(promptId);
+  if (queueState.state === "unknown") {
+    throw new ComfyError(`任务 ${promptId} 既不在队列也不在历史中（id 写错，或历史已被清理）`);
+  }
+
+  if (!opts.wait) {
+    if (opts.json) {
+      process.stdout.write(
+        JSON.stringify(
+          { promptId, status: queueState.state, ...(queueState.state === "pending" ? { position: queueState.position } : {}) },
+          null,
+          2,
+        ) + "\n",
+      );
+    } else {
+      log(`任务 ${promptId} ${describeQueue(queueState)}（加 --wait 等完成并下载）`);
+    }
+    return;
+  }
+
+  log(`任务 ${promptId} ${describeQueue(queueState)}，继续等待…`);
+  const { entry: done, elapsedMs } = await client.wait(promptId, {
+    timeoutMs: resolveTimeout(opts.timeout, config) * 1000,
+    intervalMs: 15_000,
+    onTick: (elapsed) => log(`等待中… 已用 ${humanDuration(elapsed)}`),
+  });
+  emitDone(promptId, await downloadOutputs(client, done, outDir, true), opts, elapsedMs);
 }
 
 async function runSync(opts: Options): Promise<void> {
@@ -382,10 +481,12 @@ async function main(): Promise<void> {
     }
     case "workflows":
       return listWorkflows();
+    case "status":
+      return reportStatus(opts);
     case "sync":
       return runSync(opts);
     default:
-      throw new UsageError(`未知命令 "${opts.command}"，可用: image / video / run / workflows / sync`);
+      throw new UsageError(`未知命令 "${opts.command}"，可用: image / video / run / workflows / status / sync`);
   }
 }
 

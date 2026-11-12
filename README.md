@@ -34,6 +34,22 @@ instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 
 生成结果默认存到 `./outputs/`（`-o/--out` 可改），成功时 stdout 每行一个文件路径，进度日志走 stderr。
 
+### 异步提交与轮询
+
+`-a/--async` 提交完就退出，不阻塞等结果；stdout 打印 `prompt_id`。之后用 `instafy status <prompt_id>` 查进度，或加 `--wait` 轮询到完成并下载：
+
+```bash
+instafy image -p "赛博朋克夜市" -a            # 提交后立刻返回，stdout 是 prompt_id
+instafy video -r ./start.png -p "缓慢推进" -a --json   # JSON 里也是 promptId
+instafy status 3f1c0d2e                       # 查一次：执行中 / 排队中（第 N 位）/ 已完成
+instafy status 3f1c0d2e --wait                # 轮询直到完成，自动下载到 --out
+instafy status 3f1c0d2e --wait --json --timeout 600
+```
+
+- `status` 不带 `--wait` 只查一次就退出，适合自己写循环轮询（`while` + `sleep`）；带 `--wait` 则内部每 15 秒查一次，到 `--timeout` 还没完成就报错，错误信息里带上 `prompt_id`。
+- 任务完成后再查会直接下载结果；同一个 `prompt_id` 重复查不会产生 `-2`、`-3` 副本，已存在的文件直接复用路径。
+- `prompt_id` 既不在队列也不在历史时直接报错（id 写错，或 ComfyUI 重启后历史被清理）。
+
 ### 参数
 
 | 参数 | 说明 |
@@ -48,7 +64,9 @@ instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 | `--seconds` / `--fps` | 仅视频：时长与帧率，帧数 = seconds × fps + 1 |
 | `--timeout <秒>` | 等待上限，默认 1800（可配置） |
 | `--url <地址>` | ComfyUI 地址，默认 `http://127.0.0.1:8188`（可配置） |
-| `--json` | 输出 JSON（工作流、prompt_id、种子、耗时、文件列表） |
+| `--json` | 输出 JSON（工作流、prompt_id、种子、耗时、文件列表；`--async` 时只有 `status: "queued"`） |
+| `-a, --async` | 提交后立即返回，不等结果；stdout 打印 `prompt_id` |
+| `--wait` | 仅 `status`：轮询直到完成并下载 |
 
 ### 配置
 

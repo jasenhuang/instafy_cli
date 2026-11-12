@@ -25,6 +25,11 @@ export interface HistoryEntry {
 
 export class ComfyError extends Error {}
 
+export type QueueState =
+  | { state: "running" }
+  | { state: "pending"; position: number }
+  | { state: "unknown" };
+
 function errMessage(payload: unknown): string {
   if (!payload || typeof payload !== "object") return String(payload);
   const data = payload as { error?: unknown; node_errors?: Record<string, any> };
@@ -101,6 +106,20 @@ export class ComfyClient {
     const text = await res.text();
     if (!res.ok) throw new ComfyError(`提交任务失败:\n${errMessage(safeJson(text) ?? text)}`);
     return (JSON.parse(text) as { prompt_id: string }).prompt_id;
+  }
+
+  /** 查任务在不在队列里：running 表示正在跑，pending 带 1 起排队位次。 */
+  async queueState(promptId: string): Promise<QueueState> {
+    const res = await this.request("/queue", undefined, 30_000);
+    if (!res.ok) return { state: "unknown" };
+    const data = (await res.json()) as { queue_running?: unknown[]; queue_pending?: unknown[] };
+    const idOf = (item: unknown): string | undefined =>
+      Array.isArray(item) && typeof item[1] === "string" ? item[1] : undefined;
+
+    if ((data.queue_running ?? []).some((item) => idOf(item) === promptId)) return { state: "running" };
+    const position = (data.queue_pending ?? []).findIndex((item) => idOf(item) === promptId);
+    if (position !== -1) return { state: "pending", position: position + 1 };
+    return { state: "unknown" };
   }
 
   async history(promptId: string): Promise<HistoryEntry | undefined> {
@@ -187,7 +206,7 @@ export class ComfyClient {
   }
 }
 
-async function assertSuccess(entry: HistoryEntry): Promise<void> {
+export async function assertSuccess(entry: HistoryEntry): Promise<void> {
   const status = entry.status;
   if (status?.status_str === "error") {
     const messages = JSON.stringify(status.messages ?? []).slice(0, 2000);
