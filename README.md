@@ -25,6 +25,7 @@ npm link             # 之后可直接使用 instafy 命令（pnpm 全局 bin �
 ```bash
 instafy image "一只戴墨镜的橘猫，棚拍质感"
 instafy image --ref ./me.jpg "把背景换成东京夜景，保留人物姿态"
+instafy image -r ./a.jpg -r ./b.jpg "让图1的人物穿上图2的外套"
 instafy video --prompt "海边日落，镜头缓慢推进" --seconds 5
 instafy video --ref ./start.png "人物慢慢转头看向镜头" --width 640 --height 640
 instafy workflows            # 按远端目录列出工作流及可调参数
@@ -38,7 +39,7 @@ instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 | 参数 | 说明 |
 | --- | --- |
 | `-p, --prompt <文本>` | 提示词，也可以直接跟在 `image` / `video` 后面 |
-| `-r, --ref <文件>` | 参考图 / 首帧图，自动上传到 ComfyUI 的 `input/instafy/` |
+| `-r, --ref <文件>` | 参考图 / 首帧图，可重复传多张（顺序对应工作流声明的 `image1..image10`），自动上传到 `input/instafy/` |
 | `-n, --negative <文本>` | 反向提示词（部分工作流支持，如 Wan 视频、Z-Image） |
 | `-w, --workflow <名称\|路径>` | 工作流名称（如 `zimage_turbo_t2i`）、相对路径（如 `wan/wan2_2_14B_t2v`），或 JSON 文件路径 |
 | `--width` / `--height` | 输出尺寸；视频要求 16 的倍数 |
@@ -85,13 +86,12 @@ instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 | 场景 | 默认工作流 | 可调参数 |
 | --- | --- | --- |
 | 文生图 | `qwen_image_2_1_t2i` | `--negative --steps --seed` |
-| 改图（带 `--ref`） | `qwen_image_2_1_image_edit` | `--negative --steps --seed` |
-| `video`（含不带 `--ref`） | `minimax_h3_i2v` | `--seconds --fps --steps --seed` |
-| `video --ref` | `minimax_h3_i2v` | `--seconds --fps --steps --seed` |
+| 改图（带 `--ref`） | `qwen_image_2_1_image_edit` | `--negative --width --height --steps --seed`（最多 4 张参考图） |
+| 视频 | `minimax_h3_i2v`（需 `--ref`） | `--seconds --fps --steps --seed` |
 
 `minimax_h3_i2v` 需要参考图：不带 `--ref` 时 CLI 会直接提示“需要参考图”，不会退到 Wan。想在无参考图时跑纯文生视频，用 `--workflow wan2_2_14B_t2v`（或把 `defaults.video` 改成它）。想用 `minimax_h3_r2v`（参考图生视频）把 `defaults.videoRef` 改成 `"minimax_h3_r2v"`。
 
-这几个只是按名称优先挑的；远端改名/删除后会自动退到同类型（且是否要参考图一致）里按名称排序的第一个。想固定用哪个就加 `--workflow`，或在 `~/.instafy.json` 的 `defaults` 里改。`instafy workflows` 里 `ref` 列标 `ref` 的工作流必须用 `--ref` 传参考图。
+这几个只是按名称优先挑的；远端改名/删除后会自动退到同类型（且是否要参考图一致）里按名称排序的第一个。想固定用哪个就加 `--workflow`，或在 `~/.instafy.json` 的 `defaults` 里改。`instafy workflows` 里 `ref` 列标 `ref` / `ref×N` 的工作流必须用 `--ref` 传参考图，N 是它声明的张数。
 
 实测（A30 24G）：Qwen 文生图约 1.5 分钟，改图约 40 秒；Wan 2.2 的 2 秒 480×480 视频约 25 秒；MiniMax H3 的 2 秒视频约 6 分钟（模型很重，首次还要加载）。
 
@@ -133,7 +133,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 | --- | --- | --- |
 | `instafy:prompt` | 文本编码 / `PrimitiveString` | `prompt` / `text` / `positive_prompt` / `manual_prompt` / `global_prompt` / `value` |
 | `instafy:negative` | 反向文本节点 | `negative_prompt` / `negative` / `text` |
-| `instafy:image` | `LoadImage` | `image` |
+| `instafy:image1` … `instafy:image10` | `LoadImage` | `image` |
 | `instafy:size` | `EmptyLatentImage` 之类 | `width` + `height` |
 | `instafy:seed` | 采样器 / `RandomNoise` | `seed` / `noise_seed` |
 | `instafy:steps` | 采样器 / `BasicScheduler` | `steps` |
@@ -145,6 +145,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 - 只读标题节点上的**字面值**，不跟连线；标题不存在或没有对应字段，该参数就不绑定。
 - 一个节点只能有一个标题。采样器同时有 `seed`/`steps` 时标 `instafy:seed`，`--steps` 会自动从同一节点取；`MiniMaxH3Director` 这种把 prompt/seed/fps 放在一个节点里的，标 `instafy:prompt` 即可，其余参数从同一节点找。
 - 同一节点上的 positive/negative（Qwen 的文本编码）标 `instafy:prompt`，`--negative` 会回退到同节点的 `negative_prompt` 字段。
+- 需要多张参考图时，按 `instafy:image1`、`instafy:image2`… 给多个 `LoadImage` 打标题，`--ref` 按这个顺序依次填入（最多 10 张）。工作流实际支持几张，取决于它自己有几个图片输入：比如 `qwen_image_2_1_image_edit` 已经接了 4 张，`instafy workflows` 会显示 `ref×4`。
 - 保存节点不用标，`output` 自动取；`width`/`height` 绑到 `instafy:size` 后，`instafy workflows` 里就会显示 `--width --height`。
 
 现在 `workflows/` 里 22 个工作流已经按这套约定打好标题；新增工作流时，在 ComfyUI 里给对应节点改名即可，`instafy sync` 后立即生效。

@@ -81,16 +81,7 @@ function detectKind(graph: PromptGraph, ids: Set<string>): WorkflowKind {
 
 interface Guess {
   kind: WorkflowKind;
-  positive?: Binding;
-  negative?: Binding;
-  image?: Binding;
-  width?: Binding;
-  height?: Binding;
-  seed?: Binding;
-  steps?: Binding;
-  fps?: Binding;
-  seconds?: Binding;
-  output?: Binding;
+  bindings: Partial<Record<ParamKey, Binding>>;
   warnings: string[];
 }
 
@@ -102,6 +93,16 @@ const PARAM_TITLES: Record<ParamKey, string> = {
   prompt: "instafy:prompt",
   negative: "instafy:negative",
   image: "instafy:image",
+  image1: "instafy:image1",
+  image2: "instafy:image2",
+  image3: "instafy:image3",
+  image4: "instafy:image4",
+  image5: "instafy:image5",
+  image6: "instafy:image6",
+  image7: "instafy:image7",
+  image8: "instafy:image8",
+  image9: "instafy:image9",
+  image10: "instafy:image10",
   width: "instafy:size",
   height: "instafy:size",
   seed: "instafy:seed",
@@ -116,6 +117,16 @@ const PARAM_FIELDS: Record<ParamKey, string[]> = {
   prompt: ["prompt", "text", "positive_prompt", "manual_prompt", "global_prompt", "value"],
   negative: ["negative_prompt", "negative", "text"],
   image: ["image"],
+  image1: ["image"],
+  image2: ["image"],
+  image3: ["image"],
+  image4: ["image"],
+  image5: ["image"],
+  image6: ["image"],
+  image7: ["image"],
+  image8: ["image"],
+  image9: ["image"],
+  image10: ["image"],
   width: ["width"],
   height: ["height"],
   seed: ["seed", "noise_seed"],
@@ -141,7 +152,16 @@ const PARAM_FALLBACK_FIELDS: Partial<Record<ParamKey, string[]>> = {
 const BIND_PARAMS: ParamKey[] = [
   "prompt",
   "negative",
-  "image",
+  "image1",
+  "image2",
+  "image3",
+  "image4",
+  "image5",
+  "image6",
+  "image7",
+  "image8",
+  "image9",
+  "image10",
   "width",
   "height",
   "seed",
@@ -163,12 +183,13 @@ function bindByTitles(graph: PromptGraph): Guess {
   const ids = roots.length > 0 ? upstreamOf(graph, roots) : new Set(Object.keys(graph));
   const kind = detectKind(graph, ids);
 
-  const guess: Guess = { kind, warnings };
+  const bindings: Partial<Record<ParamKey, Binding>> = {};
+  const guess: Guess = { kind, bindings, warnings };
 
   if (roots.length > 0) {
     const videoSave = roots.find((id) => VIDEO_SAVE_NODES.includes(graph[id].class_type));
     const saveId = videoSave ?? roots[0];
-    if (graph[saveId].class_type.startsWith("Save")) guess.output = [saveId, "filename_prefix"];
+    if (graph[saveId].class_type.startsWith("Save")) bindings.output = [saveId, "filename_prefix"];
   }
 
   const titled = [...ids]
@@ -187,20 +208,18 @@ function bindByTitles(graph: PromptGraph): Guess {
   }
 
   const bind = (param: ParamKey): void => {
-    const want = PARAM_TITLES[param];
-    const exact = titled.filter((id) => titleOf(graph, id) === want);
+    // image1 兼容旧标题 instafy:image
+    const titles = param === "image1" ? [PARAM_TITLES.image1, PARAM_TITLES.image] : [PARAM_TITLES[param]];
+    const exact = titled.filter((id) => titles.includes(titleOf(graph, id)));
     const fallbackFields = PARAM_FALLBACK_FIELDS[param];
-    const groups = fallbackFields
-      ? [exact, titled.filter((id) => titleOf(graph, id) !== want)]
-      : [exact];
+    const groups = fallbackFields ? [exact, titled.filter((id) => !titles.includes(titleOf(graph, id)))] : [exact];
     for (const group of groups) {
       for (const id of group) {
         const fields = group === exact ? PARAM_FIELDS[param] : fallbackFields!;
         for (const field of fields) {
           const value = graph[id].inputs[field];
           if (value === undefined || isLink(value)) continue;
-          const key = param === "prompt" ? "positive" : param;
-          (guess as unknown as Record<string, unknown>)[key] = [id, field] satisfies Binding;
+          bindings[param] = [id, field];
           return;
         }
       }
@@ -209,10 +228,8 @@ function bindByTitles(graph: PromptGraph): Guess {
 
   for (const param of BIND_PARAMS) bind(param);
 
-  const missing = BIND_PARAMS.filter((param) => {
-    const key = param === "prompt" ? "positive" : param;
-    return (guess as unknown as Record<string, unknown>)[key] === undefined;
-  });
+  const required = BIND_PARAMS.filter((param) => !/^image[2-9]$|^image10$/.test(param));
+  const missing = required.filter((param) => !bindings[param]);
   if (missing.length > 0) {
     warnings.push(
       titled.length > 0
@@ -311,25 +328,13 @@ function sha1Of(buf: Buffer): string {
 }
 
 function buildWorkflow(rel: string, graph: PromptGraph, name: string, guess: Guess): Workflow {
-  const bindings: Partial<Record<ParamKey, Binding>> = {};
-  if (guess.positive) bindings.prompt = guess.positive;
-  if (guess.negative) bindings.negative = guess.negative;
-  if (guess.image) bindings.image = guess.image;
-  if (guess.width) bindings.width = guess.width;
-  if (guess.height) bindings.height = guess.height;
-  if (guess.seed) bindings.seed = guess.seed;
-  if (guess.steps) bindings.steps = guess.steps;
-  if (guess.fps) bindings.fps = guess.fps;
-  if (guess.seconds) bindings.seconds = guess.seconds;
-  if (guess.output) bindings.output = guess.output;
-
   return {
     name,
     kind: guess.kind,
     description: `同步自 ${rel}`,
     source: rel,
     syncedAt: new Date().toISOString(),
-    bindings,
+    bindings: guess.bindings,
     graph,
   };
 }
@@ -433,9 +438,6 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
 
         for (const warning of [...warnings, ...guess.warnings]) {
           process.stderr.write(`  ${record.rel}: ${warning}\n`);
-        }
-        if (!guess.positive) {
-          process.stderr.write(`  ${record.rel}: 未识别到提示词输入，需手动编辑 bindings\n`);
         }
       } catch (err) {
         result.failed.push({ rel: record.rel, error: (err as Error).message });

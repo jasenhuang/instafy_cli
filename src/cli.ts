@@ -6,6 +6,7 @@ import { syncWorkflows } from "./sync.js";
 import { DEFAULT_URL, loadConfig, resolveBaseUrl, resolveOutDir, resolveTimeout } from "./config.js";
 import {
   buildGraph,
+  imageSlots,
   loadBuiltinWorkflows,
   resolveWorkflow,
   supportedParams,
@@ -34,7 +35,8 @@ interface Options {
   json?: boolean;
   help?: boolean;
   prompt?: string;
-  ref?: string;
+  /** 参考图，可重复传（--ref a --ref b） */
+  refs?: string[];
   negative?: string;
   workflow?: string;
   out?: string;
@@ -135,6 +137,11 @@ function parseArgs(argv: string[]): Options {
     const value = inlineValue ?? argv[++i];
     if (value === undefined) throw new UsageError(`--${name} 缺少取值`);
 
+    if (name === "ref") {
+      (opts.refs ??= []).push(value);
+      continue;
+    }
+
     if (NUMBER_KEYS.has(name)) {
       const num = Number(value);
       if (!Number.isFinite(num)) throw new UsageError(`--${name} 需要数字，收到 "${value}"`);
@@ -172,6 +179,16 @@ const PARAM_LABELS: Partial<Record<ParamKey, string>> = {
   prompt: "--prompt",
   negative: "--negative",
   image: "--ref",
+  image1: "--ref",
+  image2: "--ref",
+  image3: "--ref",
+  image4: "--ref",
+  image5: "--ref",
+  image6: "--ref",
+  image7: "--ref",
+  image8: "--ref",
+  image9: "--ref",
+  image10: "--ref",
   width: "--width",
   height: "--height",
   seed: "--seed",
@@ -192,19 +209,28 @@ function warnUnsupported(workflow: Workflow, params: Params): void {
 
 async function generate(kind: WorkflowKind | undefined, opts: Options, workflowSpec?: string): Promise<void> {
   const prompt = opts.prompt ?? opts.positional[0];
+  const refImages = opts.refs ?? [];
   const config = loadConfig();
-  const workflow = resolveWorkflow(workflowSpec ?? opts.workflow, kind, Boolean(opts.ref), config.defaults, log);
+  const workflow = resolveWorkflow(workflowSpec ?? opts.workflow, kind, refImages.length > 0, config.defaults, log);
   const mode = kind ?? workflow.kind;
 
   if (kind && workflow.kind !== kind) {
     throw new UsageError(`工作流 ${workflow.name} 是 ${workflow.kind} 类型，不能用 ${kind} 模式跑`);
   }
-  if (workflow.bindings.image && !opts.ref) {
+  const slots = imageSlots(workflow);
+  if (refImages.length > 0 && slots.length === 0) {
+    throw new UsageError(`工作流 ${workflow.name} 不支持参考图，去掉 --ref 再试`);
+  }
+  if (slots.length > 0 && refImages.length === 0) {
     throw new UsageError(
-      `工作流 ${workflow.name} 需要参考图，请加 --ref <图片>；想跑纯文生视频可加 --workflow wan2_2_14B_t2v`,
+      `工作流 ${workflow.name} 需要参考图（支持 ${slots.length} 张），请加 --ref <图片>` +
+        `；想跑纯文生视频可加 --workflow wan2_2_14B_t2v`,
     );
   }
-  if (!prompt && !opts.ref) {
+  if (refImages.length > slots.length) {
+    throw new UsageError(`工作流 ${workflow.name} 最多支持 ${slots.length} 张参考图，收到 ${refImages.length} 张`);
+  }
+  if (!prompt && refImages.length === 0) {
     throw new UsageError("请提供提示词（--prompt 或直接跟在命令后面），或用 --ref 提供参考图");
   }
 
@@ -224,9 +250,9 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
 
   const client = new ComfyClient(resolveBaseUrl(opts.url, process.env, config));
 
-  if (opts.ref) {
-    log(`上传参考图 ${opts.ref} …`);
-    params.image = await client.uploadImage(opts.ref);
+  for (const [index, ref] of refImages.entries()) {
+    log(`上传参考图 ${ref} …`);
+    params[slots[index]] = await client.uploadImage(ref);
   }
 
   const graph = buildGraph(workflow, params);
@@ -313,7 +339,7 @@ async function listWorkflows(): Promise<void> {
   const nameWidth = Math.max(16, ...names.map((name) => name.length));
   const paramOrder: ParamKey[] = ["negative", "width", "height", "seconds", "fps", "steps", "seed"];
 
-  process.stdout.write(`共 ${workflows.size} 个工作流（ref = 需要 --ref）\n`);
+  process.stdout.write(`共 ${workflows.size} 个工作流（ref / ref×N = 需要的参考图张数，用 --ref 依次传入）\n`);
   for (const [group, list] of [...groups.entries()].sort((a, b) =>
     a[0] === "（根目录）" ? -1 : b[0] === "（根目录）" ? 1 : a[0].localeCompare(b[0]),
   )) {
@@ -321,8 +347,9 @@ async function listWorkflows(): Promise<void> {
     for (const workflow of list) {
       const params = paramOrder.filter((key) => workflow.bindings[key]);
       const flags = params.map((key) => `--${key}`).join(" ");
-      const ref = workflow.bindings.image ? "ref" : "-";
-      const line = `  ${workflow.name.padEnd(nameWidth)}  ${workflow.kind.padEnd(6)}${ref.padEnd(4)}${flags}`;
+      const slotCount = imageSlots(workflow).length;
+      const ref = slotCount === 0 ? "-" : slotCount === 1 ? "ref" : `ref×${slotCount}`;
+      const line = `  ${workflow.name.padEnd(nameWidth)}  ${workflow.kind.padEnd(6)}${ref.padEnd(6)}${flags}`;
       process.stdout.write(`${line.trimEnd()}\n`);
     }
   }

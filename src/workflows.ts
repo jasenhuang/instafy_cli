@@ -22,7 +22,18 @@ export interface Workflow {
 export type ParamKey =
   | "prompt"
   | "negative"
+  /** 旧格式兼容：等价于 image1 */
   | "image"
+  | "image1"
+  | "image2"
+  | "image3"
+  | "image4"
+  | "image5"
+  | "image6"
+  | "image7"
+  | "image8"
+  | "image9"
+  | "image10"
   | "width"
   | "height"
   | "seed"
@@ -32,6 +43,27 @@ export type ParamKey =
   | "output";
 
 export type Params = Partial<Record<ParamKey, string | number | undefined>>;
+
+/** 参考图槽位，顺序即 --ref 的传参顺序 */
+export const IMAGE_PARAMS: ParamKey[] = [
+  "image1",
+  "image2",
+  "image3",
+  "image4",
+  "image5",
+  "image6",
+  "image7",
+  "image8",
+  "image9",
+  "image10",
+];
+
+/** 工作流声明的参考图槽位（旧的 image binding 视为单张） */
+export function imageSlots(workflow: Workflow): ParamKey[] {
+  const slots = IMAGE_PARAMS.filter((key) => workflow.bindings[key]);
+  if (slots.length === 0 && workflow.bindings.image) return ["image"];
+  return slots;
+}
 
 /** 内置 / 同步来的工作流目录（构建后仍指向项目根目录下的 workflows/） */
 export const WORKFLOWS_DIR = fileURLToPath(new URL("../workflows", import.meta.url));
@@ -147,7 +179,7 @@ function pickDefault(
     if (workflow && workflow.kind === kind) return workflow;
   }
   const fallback = [...workflows.values()]
-    .filter((workflow) => workflow.kind === kind && Boolean(workflow.bindings.image) === hasRef)
+    .filter((workflow) => workflow.kind === kind && imageSlots(workflow).length > 0 === hasRef)
     .sort((a, b) => a.name.localeCompare(b.name))[0];
   if (fallback) return fallback;
 
