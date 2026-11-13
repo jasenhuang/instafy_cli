@@ -11,6 +11,7 @@ import {
   loadBuiltinWorkflows,
   resolveWorkflow,
   supportedParams,
+  workflowsDir,
   type ParamKey,
   type Params,
   type Workflow,
@@ -97,8 +98,13 @@ sync 选项:
       --prune               删除远端已不存在的工作流文件
                             （参数由节点标题 instafy:* 绑定，见 README）
 
+工作流目录:
+  同步结果默认写入 CLI 执行目录下的 workflows/，加载工作流也从这里（叠加内置目录）。
+  想换位置就在 ~/.instafy.json 里设 "workflowsDir"（支持 ~ 开头）。
+
 配置文件 ~/.instafy.json:
   { "url": "http://127.0.0.1:8188", "out": "~/instafy-outputs", "timeout": 1800,
+    "workflowsDir": "~/instafy-workflows",
     "defaults": { "image": "qwen_image_2_1_t2i", "imageRef": "flux2_klein_i2i",
                   "video": "wan2_2_14B_t2v", "videoRef": "minimax_h3_i2v" } }
   只写需要的字段；命令行参数优先于配置。
@@ -413,6 +419,7 @@ async function runSync(opts: Options): Promise<void> {
   }
 
   log(`远端目录 ${result.remoteDir}${opts.dryRun ? "（--dry-run，未写入文件）" : ""}`);
+  log(`本地目录 ${result.localDir}`);
   log(
     `新增 ${result.added.length} / 更新 ${result.updated.length} / 未变 ${result.unchanged.length} / ` +
       `跳过 ${result.skipped.length} / 失败 ${result.failed.length}` +
@@ -428,7 +435,7 @@ async function runSync(opts: Options): Promise<void> {
 async function listWorkflows(): Promise<void> {
   const workflows = loadBuiltinWorkflows();
   if (workflows.size === 0) {
-    log("workflows/ 目录下没有工作流，先运行 instafy sync");
+    log(`${workflowsDir()} 下没有工作流，先运行 instafy sync`);
     return;
   }
 
@@ -462,7 +469,21 @@ async function listWorkflows(): Promise<void> {
   }
 }
 
+/**
+ * stdout/stderr 被下游提前关闭（`instafy workflows | head`、`| grep -q`）时别崩：
+ * EPIPE 直接安静退出，其他错误照旧抛出去。
+ */
+function guardPipes(): void {
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EPIPE") process.exit(0);
+      throw err;
+    });
+  }
+}
+
 async function main(): Promise<void> {
+  guardPipes();
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help || !opts.command) {
     process.stdout.write(HELP);

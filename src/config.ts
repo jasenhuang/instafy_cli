@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 export const DEFAULT_URL = "http://127.0.0.1:8188";
-/** 用户配置：{ "url": "...", "out": "...", "timeout": 1800 } */
+/** 用户配置：{ "url": "...", "out": "...", "workflowsDir": "...", "timeout": 1800 } */
 export const CONFIG_FILE = path.join(os.homedir(), ".instafy.json");
 
 export interface DefaultWorkflows {
@@ -21,6 +21,8 @@ export interface InstafyConfig {
   url?: string;
   /** 默认输出目录，支持 ~ 开头 */
   out?: string;
+  /** 工作流目录（sync 的写入位置，也是加载位置），支持 ~ 开头 */
+  workflowsDir?: string;
   /** 默认等待上限（秒） */
   timeout?: number;
   /** 默认工作流，未设置时用内置优先级 */
@@ -50,7 +52,7 @@ export function loadConfig(file = CONFIG_FILE): InstafyConfig {
     throw invalid(file, "内容应为 JSON 对象");
   }
 
-  const { url, out, timeout, defaults } = parsed as Record<string, unknown>;
+  const { url, out, workflowsDir, timeout, defaults } = parsed as Record<string, unknown>;
   const config: InstafyConfig = {};
 
   if (url !== undefined) {
@@ -67,6 +69,13 @@ export function loadConfig(file = CONFIG_FILE): InstafyConfig {
   if (out !== undefined) {
     if (typeof out !== "string" || out.trim() === "") throw invalid(file, "的 out 应为非空字符串");
     config.out = out.trim();
+  }
+
+  if (workflowsDir !== undefined) {
+    if (typeof workflowsDir !== "string" || workflowsDir.trim() === "") {
+      throw invalid(file, "的 workflowsDir 应为非空字符串");
+    }
+    config.workflowsDir = workflowsDir.trim();
   }
 
   if (timeout !== undefined) {
@@ -96,11 +105,22 @@ export function loadConfig(file = CONFIG_FILE): InstafyConfig {
 }
 
 /** 展开开头的 ~，再按当前目录解析成绝对路径 */
-export function resolveOutDir(flag?: string, config: InstafyConfig = loadConfig()): string {
-  const dir = flag ?? config.out ?? "outputs";
+function resolveDir(dir: string): string {
   const home = os.homedir();
   const expanded = dir === "~" ? home : dir.startsWith("~/") ? path.join(home, dir.slice(2)) : dir;
   return path.resolve(expanded);
+}
+
+/** 默认输出目录（相对 CLI 执行目录） */
+export function resolveOutDir(flag?: string, config: InstafyConfig = loadConfig()): string {
+  return resolveDir(flag ?? config.out ?? "outputs");
+}
+
+export const DEFAULT_WORKFLOWS_DIR = "workflows";
+
+/** 工作流目录：配置 workflowsDir，未设置时用 CLI 执行目录下的 workflows/ */
+export function resolveWorkflowsDir(flag?: string, config: InstafyConfig = loadConfig()): string {
+  return resolveDir(flag ?? config.workflowsDir ?? DEFAULT_WORKFLOWS_DIR);
 }
 
 export const DEFAULT_TIMEOUT = 1800;

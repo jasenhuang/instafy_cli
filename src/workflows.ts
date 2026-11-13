@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PromptGraph } from "./client.js";
+import { loadConfig, resolveWorkflowsDir } from "./config.js";
 
 export type WorkflowKind = "image" | "video";
 
@@ -65,8 +66,19 @@ export function imageSlots(workflow: Workflow): ParamKey[] {
   return slots;
 }
 
-/** 内置 / 同步来的工作流目录（构建后仍指向项目根目录下的 workflows/） */
-export const WORKFLOWS_DIR = fileURLToPath(new URL("../workflows", import.meta.url));
+/** 随发布包内置的工作流目录（构建后指向项目根目录下的 workflows/） */
+export const PACKAGED_WORKFLOWS_DIR = fileURLToPath(new URL("../workflows", import.meta.url));
+
+/** 工作流目录：配置 workflowsDir，默认 CLI 执行目录下的 workflows/ */
+export function workflowsDir(): string {
+  return resolveWorkflowsDir(undefined, loadConfig());
+}
+
+/** 读取时以内置目录为基底，用户目录（默认 ./workflows）覆盖同名工作流。 */
+function searchDirs(): string[] {
+  const userDir = workflowsDir();
+  return userDir === PACKAGED_WORKFLOWS_DIR ? [userDir] : [PACKAGED_WORKFLOWS_DIR, userDir];
+}
 
 function readWorkflow(filePath: string): Workflow {
   const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as Workflow;
@@ -76,8 +88,8 @@ function readWorkflow(filePath: string): Workflow {
   return raw;
 }
 
-/** 递归列出 workflows/ 下的工作流文件（返回相对 workflows/ 的路径）。 */
-function listWorkflowFiles(dir = WORKFLOWS_DIR): string[] {
+/** 递归列出目录下的工作流文件（返回相对该目录的路径）。 */
+function listWorkflowFiles(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
   const files: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -102,10 +114,12 @@ interface WorkflowIndex {
 function loadIndex(): WorkflowIndex {
   const byName = new Map<string, Workflow>();
   const byPath = new Map<string, Workflow>();
-  for (const rel of listWorkflowFiles()) {
-    const workflow = readWorkflow(path.join(WORKFLOWS_DIR, rel));
-    byName.set(workflow.name, workflow);
-    byPath.set(rel.replace(/\.json$/i, ""), workflow);
+  for (const dir of searchDirs()) {
+    for (const rel of listWorkflowFiles(dir)) {
+      const workflow = readWorkflow(path.join(dir, rel));
+      byName.set(workflow.name, workflow);
+      byPath.set(rel.replace(/\.json$/i, ""), workflow);
+    }
   }
   return { byName, byPath };
 }

@@ -3,15 +3,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { ComfyClient, type PromptGraph } from "./client.js";
 import { convertWorkflow, type NodeSchema } from "./convert.js";
-import { resolveBaseUrl } from "./config.js";
-import { WORKFLOWS_DIR, type Binding, type ParamKey, type Workflow, type WorkflowKind } from "./workflows.js";
+import { loadConfig, resolveBaseUrl, resolveWorkflowsDir } from "./config.js";
+import { type Binding, type ParamKey, type Workflow, type WorkflowKind } from "./workflows.js";
 
 const MANIFEST_FILE = ".instafy-sync.json";
 /** ComfyUI user/default 下的相对目录，对应 ~/ComfyUI/user/default/workflows */
 const DEFAULT_DIR = "workflows";
 
 interface ManifestEntry {
-  /** 相对 workflows/ 的路径，保留远端目录结构 */
+  /** 相对工作流目录的路径，保留远端目录结构 */
   file: string;
   name: string;
   sha1: string;
@@ -28,6 +28,8 @@ export interface SyncOptions {
   url?: string;
   /** user/default 下的相对目录，或 ~/ComfyUI/user/default/workflows 这类绝对路径 */
   dir?: string;
+  /** 本地写入目录，不传则按配置 workflowsDir / 默认 ./workflows 解析 */
+  workflowsDir?: string;
   dryRun?: boolean;
   force?: boolean;
   prune?: boolean;
@@ -42,6 +44,8 @@ export interface SyncResult {
   pruned: string[];
   /** user/default 下的相对目录 */
   remoteDir: string;
+  /** 本地工作流目录（绝对路径） */
+  localDir: string;
 }
 
 const VIDEO_SAVE_NODES = ["SaveVideo", "VHS_VideoCombine", "SaveAnimatedWEBP", "SaveAnimatedWEBM"];
@@ -275,9 +279,9 @@ function pickName(rel: string, manifest: Manifest): string {
   return name;
 }
 
-async function readManifest(): Promise<Manifest> {
+async function readManifest(localDir: string): Promise<Manifest> {
   try {
-    const raw = await fs.readFile(path.join(WORKFLOWS_DIR, MANIFEST_FILE), "utf8");
+    const raw = await fs.readFile(path.join(localDir, MANIFEST_FILE), "utf8");
     const parsed = JSON.parse(raw) as Manifest;
     if (parsed?.entries) return parsed;
   } catch {
@@ -286,8 +290,8 @@ async function readManifest(): Promise<Manifest> {
   return { version: 1, entries: {} };
 }
 
-async function writeManifest(manifest: Manifest): Promise<void> {
-  await fs.writeFile(path.join(WORKFLOWS_DIR, MANIFEST_FILE), JSON.stringify(manifest, null, 2) + "\n");
+async function writeManifest(localDir: string, manifest: Manifest): Promise<void> {
+  await fs.writeFile(path.join(localDir, MANIFEST_FILE), JSON.stringify(manifest, null, 2) + "\n");
 }
 
 function fileExists(filePath: string): Promise<boolean> {
@@ -297,11 +301,11 @@ function fileExists(filePath: string): Promise<boolean> {
   );
 }
 
-/** 删除同步留下的空目录（不会越过 workflows/）。 */
-async function pruneEmptyDirs(dir: string): Promise<void> {
+/** 删除同步留下的空目录（不会越过工作流目录）。 */
+async function pruneEmptyDirs(dir: string, root: string): Promise<void> {
   let current = path.resolve(dir);
-  const root = path.resolve(WORKFLOWS_DIR);
-  while (current !== root && current.startsWith(root + path.sep)) {
+  const rootDir = path.resolve(root);
+  while (current !== rootDir && current.startsWith(rootDir + path.sep)) {
     try {
       if ((await fs.readdir(current)).length > 0) return;
       await fs.rmdir(current);
@@ -340,7 +344,9 @@ function buildWorkflow(rel: string, graph: PromptGraph, name: string, guess: Gue
 }
 
 export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult> {
+  const config = loadConfig();
   const dir = normalizeUserDataDir(opts.dir);
+  const localDir = resolveWorkflowsDir(opts.workflowsDir, config);
   const result: SyncResult = {
     added: [],
     updated: [],
@@ -349,12 +355,13 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
     failed: [],
     pruned: [],
     remoteDir: dir,
+    localDir,
   };
 
-  const client = new ComfyClient(resolveBaseUrl(opts.url));
+  const client = new ComfyClient(resolveBaseUrl(opts.url, process.env, config));
 
   const remotePaths = await client.listUserData(dir, true);
-  const manifest = await readManifest();
+  const manifest = await readManifest(localDir);
 
   const records: Array<{ rel: string; content: Buffer; sha1: string }> = [];
   for (const listed of remotePaths) {
@@ -371,7 +378,7 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
   const pending: Array<{ rel: string; content: Buffer; sha1: string }> = [];
   for (const record of records) {
     const tracked = manifest.entries[record.rel];
-    const localFile = tracked ? path.join(WORKFLOWS_DIR, tracked.file) : undefined;
+    const localFile = tracked ? path.join(localDir, tracked.file) : undefined;
     const exists = localFile ? await fileExists(localFile) : false;
 
     if (tracked && exists && tracked.sha1 === record.sha1 && tracked.file === targetFile(record.rel) && !opts.force) {
@@ -387,9 +394,9 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
       if (remoteRels.has(rel)) continue;
       result.pruned.push(rel);
       if (opts.dryRun) continue;
-      const target = path.join(WORKFLOWS_DIR, entry.file);
+      const target = path.join(localDir, entry.file);
       if (await fileExists(target)) await fs.unlink(target);
-      await pruneEmptyDirs(path.dirname(target));
+      await pruneEmptyDirs(path.dirname(target), localDir);
       delete manifest.entries[rel];
     }
   }
@@ -406,7 +413,7 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
     for (const record of pending) {
       const tracked = manifest.entries[record.rel];
       const file = targetFile(record.rel);
-      const target = path.join(WORKFLOWS_DIR, file);
+      const target = path.join(localDir, file);
 
       if (!tracked && (await fileExists(target)) && !opts.force) {
         result.skipped.push(record.rel);
@@ -430,7 +437,7 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
 
         // 旧版本按文件名平铺，路径变了就清掉旧文件
         if (tracked && tracked.file !== file) {
-          const stale = path.join(WORKFLOWS_DIR, tracked.file);
+          const stale = path.join(localDir, tracked.file);
           if (await fileExists(stale)) await fs.unlink(stale);
         }
 
@@ -449,6 +456,6 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
   result.added = result.added.filter((rel) => !failedRels.has(rel));
   result.updated = result.updated.filter((rel) => !failedRels.has(rel));
 
-  await writeManifest(manifest);
+  await writeManifest(localDir, manifest);
   return result;
 }

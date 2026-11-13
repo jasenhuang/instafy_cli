@@ -76,6 +76,7 @@ instafy status 3f1c0d2e --wait --json --timeout 600
 {
   "url": "http://127.0.0.1:8188",
   "out": "~/instafy-outputs",
+  "workflowsDir": "~/instafy-workflows",
   "timeout": 1800,
   "defaults": {
     "image": "qwen_image_2_1_t2i",
@@ -90,6 +91,7 @@ instafy status 3f1c0d2e --wait --json --timeout 600
 | --- | --- | --- | --- |
 | `url` | ComfyUI 地址 | `http://127.0.0.1:8188` | `--url`（另有 `INSTAFY_COMFY_URL`，优先级高于配置） |
 | `out` | 输出目录，支持 `~` 开头 | `./outputs` | `--out` |
+| `workflowsDir` | 工作流目录（`sync` 写入、运行时加载），支持 `~` 开头 | `./workflows`（CLI 执行目录） | — |
 | `timeout` | 等待上限（秒） | `1800` | `--timeout` |
 | `defaults` | 默认工作流，见下方 | 见「默认工作流」 | `--workflow` |
 
@@ -115,7 +117,9 @@ instafy status 3f1c0d2e --wait --json --timeout 600
 
 ## 同步远端工作流
 
-把 ComfyUI `~/ComfyUI/user/default/workflows` 里（含子目录）的 UI 格式工作流，用 CLI 内置的转换器（`src/convert.ts`，等价于原来的 `ui2api.py`）转成 API 格式，按节点标题解析参数后写进 `workflows/`：
+把 ComfyUI `~/ComfyUI/user/default/workflows` 里（含子目录）的 UI 格式工作流，用 CLI 内置的转换器（`src/convert.ts`，等价于原来的 `ui2api.py`）转成 API 格式，按节点标题解析参数后写进工作流目录：
+
+工作流目录默认为 **运行 `instafy` 时所在目录下的 `workflows/`**，也可以在 `~/.instafy.json` 里用 `"workflowsDir"` 指定（支持 `~`，相对路径按运行目录解析）。加载时以发布包内置的 `workflows/` 为基底，再叠加这个目录，同名工作流以后者为准。
 
 ```bash
 instafy sync --dry-run      # 先看会新增/更新哪些
@@ -133,11 +137,11 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 
 机制说明：
 
-- **目录结构原样保留**：远端 `flux/xxx.json` 同步到 `workflows/flux/xxx.json`，`minimax_h3/`、`wan/` 等子目录一一对应，`workflows/` 根目录也可以直接放自己的 JSON。工作流名默认取文件名，跨目录重名时自动加父目录前缀，也可以用相对路径（`wan/wan2_2_14B_t2v`）指定。
+- **目录结构原样保留**：远端 `flux/xxx.json` 同步到工作流目录的 `flux/xxx.json`，`minimax_h3/`、`wan/` 等子目录一一对应，目录根下也可以直接放自己的 JSON。工作流名默认取文件名，跨目录重名时自动加父目录前缀，也可以用相对路径（`wan/wan2_2_14B_t2v`）指定。
 - **转换发生在 `instafy sync` 时，由 CLI 自己完成**：通过 ComfyUI 的 HTTP 接口 `GET /api/userdata?dir=workflows&recurse=true` 递归列文件、`GET /api/userdata/<path>` 读内容，再拉一次 `/object_info` 拿节点 schema，在本地把 UI 格式（子图、mute/bypass、widgets 位置映射）展开成 `/prompt` 的 API 格式。不再依赖服务器上的 Python 脚本。
 - 本地存下来的已经是 API 格式（`graph` 字段），运行 `instafy image/video` 时不再做任何格式转换；远端本来就是 API 格式的文件会原样保留。
 - 每次同步先用 HTTP 列出远端工作流并算 sha1（文件不大，直接拉下来算），未变化的不重新转换。
-- 同步记录存在 `workflows/.instafy-sync.json`，记录 `远端相对路径 → 本地文件 / 工作流名 / sha1 / 同步时间`。手工新建的同名文件不会被默默覆盖（提示跳过），需要 `--force`。
+- 同步记录存在工作流目录下的 `.instafy-sync.json`，记录 `远端相对路径 → 本地文件 / 工作流名 / sha1 / 同步时间`。同步只管理这个目录；内置目录里的文件不会被 `--prune` 删掉。手工新建的同名文件不会被默默覆盖（提示跳过），需要 `--force`。
 - 转换后会按 `object_info` 的默认值补齐 UI 格式里缺失的必填控件（例如 `SaveImageAdvanced` 的 `format.bit_depth`），否则 `/prompt` 会校验失败。
 - **参数由节点标题声明**（见下一节）：同步时只认标题，不做图结构推断。没有标题的参数不会绑定，`instafy sync` 会在 stderr 里提示哪些参数缺失。
 - 少数工作流本身不产出文件（如 `qwen3vl_i2t` 只有 `PreviewAny`），同步仍会照常写入；`output` 取保存节点的 `filename_prefix`，没有保存节点就只出预览。
@@ -170,7 +174,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 
 ## 自定义工作流
 
-`workflows/*.json` 就是 ComfyUI 的 API 格式（`/prompt` 请求里的 `prompt`），外面包一层元信息：
+`workflows/*.json`（工作流目录下，默认为 `./workflows`）就是 ComfyUI 的 API 格式（`/prompt` 请求里的 `prompt`），外面包一层元信息：
 
 ```json
 {
