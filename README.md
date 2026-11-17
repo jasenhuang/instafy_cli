@@ -1,6 +1,6 @@
 # instafy
 
-调用 `novel` 机器上 ComfyUI 服务的命令行工具：给一段提示词（可选参考图、指定工作流），拿到图片或视频。
+调用 `novel` 机器上 ComfyUI 服务的命令行工具：给一段提示词（可选参考图 / 视频 / 音频、指定工作流），拿到图片或视频。
 
 默认连 `http://127.0.0.1:8188`，也可以把地址写进 `~/.instafy.json`，或用 `--url` / `INSTAFY_COMFY_URL` 临时覆盖。默认地址不是本机时请把 ComfyUI 监听在可访问地址上，或自己先做端口转发。
 
@@ -28,6 +28,8 @@ instafy image --ref ./me.jpg "把背景换成东京夜景，保留人物姿态"
 instafy image -r ./a.jpg -r ./b.jpg "让图1的人物穿上图2的外套"
 instafy video --prompt "海边日落，镜头缓慢推进" --seconds 5
 instafy video --ref ./start.png "人物慢慢转头看向镜头" --width 640 --height 640
+instafy video -rv ./pose.mp4 -ra ./bgm.mp3 --ref ./first.png -p "镜头跟随人物"   # 参考视频 + 音频 + 图
+instafy run wan/wan_animate2_v2v --ref ./first.png --ref-video ./pose.mp4 -p "人物跳舞"
 instafy workflows            # 按远端目录列出工作流及可调参数
 instafy run zimage_turbo_t2i -p "雪夜小木屋" --steps 6 --json
 ```
@@ -55,7 +57,9 @@ instafy status 3f1c0d2e --wait --json --timeout 600
 | 参数 | 说明 |
 | --- | --- |
 | `-p, --prompt <文本>` | 提示词，也可以直接跟在 `image` / `video` 后面 |
-| `-r, --ref <文件>` | 参考图 / 首帧图，可重复传多张（顺序对应工作流声明的 `image1..image10`），自动上传到 `input/instafy/`；没传到的槽位会连同对应 `LoadImage` 一起剪掉，不会回退到工作流里的默认图 |
+| `-r, --ref <文件>` | 参考文件，可重复；按扩展名自动分流成图片 / 视频 / 音频（`.mp4`/`.mov`/`.webm` 等算视频，`.mp3`/`.wav`/`.m4a` 等算音频，其余算图片）。顺序对应工作流声明的 `image1..image10`，统一上传到 `input/instafy/`；没传到的槽位会连同对应 `LoadImage` 一起剪掉，不会回退到工作流里的默认图 |
+| `--ref-video <文件>`（`-rv`） | 参考视频，可重复，最多 3 个（顺序对应 `video1..video3`，写进 `LoadVideo` 的 `file` 字段） |
+| `--ref-audio <文件>`（`-ra`） | 参考音频，可重复，最多 3 个（顺序对应 `audio1..audio3`，写进 `LoadAudio` 的 `audio` 字段） |
 | `-n, --negative <文本>` | 反向提示词（部分工作流支持，如 Wan 视频、Z-Image） |
 | `-w, --workflow <名称\|路径>` | 工作流名称（如 `zimage_turbo_t2i`）、相对路径（如 `wan/wan2_2_14B_t2v`），或 JSON 文件路径 |
 | `--width` / `--height` | 输出尺寸；视频要求 16 的倍数 |
@@ -111,7 +115,9 @@ instafy status 3f1c0d2e --wait --json --timeout 600
 
 `minimax_h3_i2v` 需要参考图：不带 `--ref` 时 CLI 会直接提示“需要参考图”，不会退到 Wan。想在无参考图时跑纯文生视频，用 `--workflow wan2_2_14B_t2v`（或把 `defaults.video` 改成它）。想用 `minimax_h3_r2v`（参考图生视频）把 `defaults.videoRef` 改成 `"minimax_h3_r2v"`。
 
-这几个只是按名称优先挑的；远端改名/删除后会自动退到同类型（且是否要参考图一致）里按名称排序的第一个。想固定用哪个就加 `--workflow`，或在 `~/.instafy.json` 的 `defaults` 里改。`instafy workflows` 里 `ref` 列标 `ref` / `ref×N` 的工作流必须用 `--ref` 传参考图，N 是它声明的张数。
+这几个只是按名称优先挑的；远端改名/删除后会自动退到同类型（且参考文件种类/数量能对上的）里按名称排序的第一个。想固定用哪个就加 `--workflow`，或在 `~/.instafy.json` 的 `defaults` 里改。
+
+`instafy workflows` 的 `img` / `vid` / `aud` 列是工作流声明的参考槽位数（`×N` 表示多路）。没传的槽位在提交前直接剪掉（不会回退到工作流里的默认文件），某类一个都没传时 stderr 会提示一句；整份参考文件都没传才会报“需要参考文件”。图片最多 10 张，视频/音频各最多 3 个。比如 `minimax_h3_r2v` 显示 `img×9 aud×3`，可以只给一张图，音频槽位会被剪掉。
 
 实测（A30 24G）：Qwen 文生图约 1.5 分钟，改图约 40 秒；Wan 2.2 的 2 秒 480×480 视频约 25 秒；MiniMax H3 的 2 秒视频约 6 分钟（模型很重，首次还要加载）。
 
@@ -156,6 +162,8 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 | `instafy:prompt` | 文本编码 / `PrimitiveString` | `prompt` / `text` / `positive_prompt` / `manual_prompt` / `global_prompt` / `value` |
 | `instafy:negative` | 反向文本节点 | `negative_prompt` / `negative` / `text` |
 | `instafy:image1` … `instafy:image10` | `LoadImage` | `image` |
+| `instafy:video1` … `instafy:video3` | `LoadVideo` / `VHS_LoadVideo` | `file` / `video` / `filename` |
+| `instafy:audio1` … `instafy:audio3` | `LoadAudio` / `VHS_LoadAudio` | `audio` / `file` / `filename` |
 | `instafy:size` | `EmptyLatentImage` 之类 | `width` + `height` |
 | `instafy:seed` | 采样器 / `RandomNoise` | `seed` / `noise_seed` |
 | `instafy:steps` | 采样器 / `BasicScheduler` | `steps` |
@@ -167,7 +175,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 - 只读标题节点上的**字面值**，不跟连线；标题不存在或没有对应字段，该参数就不绑定。
 - 一个节点只能有一个标题。采样器同时有 `seed`/`steps` 时标 `instafy:seed`，`--steps` 会自动从同一节点取；`MiniMaxH3Director` 这种把 prompt/seed/fps 放在一个节点里的，标 `instafy:prompt` 即可，其余参数从同一节点找。
 - 同一节点上的 positive/negative（Qwen 的文本编码）标 `instafy:prompt`，`--negative` 会回退到同节点的 `negative_prompt` 字段。
-- 需要多张参考图时，按 `instafy:image1`、`instafy:image2`… 给多个 `LoadImage` 打标题，`--ref` 按这个顺序依次填入（最多 10 张）；传得比声明的少时，多出来的槽位在提交前直接删除，不会带默认图进去；因删节点而缺少必填输入的后续节点也会一并清掉（例如 Flux2 的第二个参考图分支）。工作流实际支持几张，取决于它自己有几个图片输入：比如 `qwen_image_2_1_image_edit` 已经接了 4 张，`instafy workflows` 会显示 `ref×4`。
+- 需要多张参考图时，按 `instafy:image1`、`instafy:image2`… 给多个 `LoadImage` 打标题，`--ref` 按这个顺序依次填入（最多 10 张）；参考视频/音频同理，用 `instafy:video1..3` / `instafy:audio1..3` 配 `--ref-video` / `--ref-audio`（各最多 3 个）。有视频/音频载入节点但没打标题时，`instafy sync` 会提示对应参数不可用。传得比声明的少时，多出来的槽位在提交前直接删除，不会带默认图进去；因删节点而缺少必填输入的后续节点也会一并清掉（例如 Flux2 的第二个参考图分支）。工作流实际支持几张，取决于它自己有几个对应种类的载入节点：比如 `qwen_image_2_1_image_edit` 接了 10 张图，`instafy workflows` 会显示 `img×10`。
 - 保存节点不用标，`output` 自动取；`width`/`height` 绑到 `instafy:size` 后，`instafy workflows` 里就会显示 `--width --height`。
 
 现在 `workflows/` 里 22 个工作流已经按这套约定打好标题；新增工作流时，在 ComfyUI 里给对应节点改名即可，`instafy sync` 后立即生效。
@@ -183,7 +191,9 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
   "description": "说明",
   "bindings": {
     "prompt": ["节点id", "输入名"],
-    "image": ["LoadImage节点id", "image"],
+    "image1": ["LoadImage节点id", "image"],
+    "video1": ["LoadVideo节点id", "file"],
+    "audio1": ["LoadAudio节点id", "audio"],
     "width": ["节点id", "width"],
     "height": ["节点id", "height"],
     "seed": ["KSampler节点id", "seed"],
@@ -194,7 +204,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 }
 ```
 
-- `bindings` 里出现 `image` 就会被视为“需要参考图”，CLI 会先上传文件再把返回值写成 `instafy/<文件名>`。
+- `bindings` 里出现 `image`/`image1`（或 `video1`、`audio1`）就会被视为“需要参考文件”，CLI 先上传到 `input/instafy/`，再把返回值写成 `instafy/<文件名>`。
 - 同步生成的文件，`bindings` 来自节点标题；手工写的 JSON 直接用 `bindings`，不需要标题（`instafy run/path` 不经过同步逻辑）。
 - `prompt` / `negative` / `width` / `height` / `seed` / `steps` / `seconds` / `fps` 只对声明了 binding 的参数生效，其余参数会提示“不支持，已忽略”。
 - `output` 会把保存节点的 `filename_prefix` 改成 `instafy/<工作流名>`，方便在远端输出目录里定位。
@@ -205,6 +215,6 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 ## 常见问题
 
 - **提示连不上**：先确认 ComfyUI 在跑（`curl http://127.0.0.1:8188/system_stats`）；地址不对就改 `~/.instafy.json`，或用 `--url` 临时指定。
-- **`--ref` 不生效**：所选工作流没有 `image` binding，例如 `zimage_turbo_t2i` 只支持文生图。
+- **`--ref` / `--ref-video` / `--ref-audio` 不生效**：所选工作流没有对应种类的 binding（`zimage_turbo_t2i` 只支持文生图，`wan_animate2_v2v` 同时需要参考图和参考视频）。`instafy workflows` 里对应列是 `-` 就说明它不接这类文件。
 - **视频尺寸报错**：宽高需要是 16 的倍数；`--seconds` 与 `--fps` 决定帧数，帧数需要满足 `4n+1`（工作流里的数学节点已处理，改 fps 时注意）。
 - **首次跑某个视频工作流很慢**：14B 双模型要从磁盘加载并换入显存，后续任务会快很多。

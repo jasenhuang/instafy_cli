@@ -71,13 +71,36 @@ export class ComfyClient {
     }
   }
 
-  async uploadImage(filePath: string): Promise<string> {
+  /**
+   * 上传参考文件（图片 / 视频 / 音频）到 input/instafy/，返回可直接写进节点 inputs 的路径。
+   * ComfyUI 的 /upload/image 不校验扩展名，三类文件都走这个接口。
+   */
+  async uploadMedia(filePath: string): Promise<string> {
     const buf = await fs.readFile(filePath);
     const name = filePath.split(/[\\/]/).pop()!;
     const ext = name.toLowerCase().split(".").pop() ?? "";
     const mime =
-      { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif" }[ext] ??
-      "application/octet-stream";
+      {
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        png: "image/png",
+        webp: "image/webp",
+        gif: "image/gif",
+        bmp: "image/bmp",
+        mp4: "video/mp4",
+        m4v: "video/x-m4v",
+        mov: "video/quicktime",
+        webm: "video/webm",
+        mkv: "video/x-matroska",
+        avi: "video/x-msvideo",
+        mp3: "audio/mpeg",
+        wav: "audio/wav",
+        flac: "audio/flac",
+        m4a: "audio/mp4",
+        aac: "audio/aac",
+        ogg: "audio/ogg",
+        opus: "audio/opus",
+      }[ext] ?? "application/octet-stream";
 
     const form = new FormData();
     form.append("image", new Blob([buf], { type: mime }), name);
@@ -87,7 +110,7 @@ export class ComfyClient {
 
     const res = await this.request("/upload/image", { method: "POST", body: form }, 60_000);
     const text = await res.text();
-    if (!res.ok) throw new ComfyError(`上传参考图失败: ${errMessage(safeJson(text) ?? text)}`);
+    if (!res.ok) throw new ComfyError(`上传参考文件失败: ${errMessage(safeJson(text) ?? text)}`);
 
     const data = JSON.parse(text) as { name: string; subfolder?: string };
     return data.subfolder ? `${data.subfolder}/${data.name}` : data.name;

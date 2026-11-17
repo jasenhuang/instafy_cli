@@ -6,14 +6,19 @@ import { syncWorkflows } from "./sync.js";
 import { DEFAULT_URL, loadConfig, resolveBaseUrl, resolveOutDir, resolveTimeout } from "./config.js";
 import {
   buildGraph,
-  dropImageSlots,
-  imageSlots,
+  dropMediaSlots,
+  MEDIA_KINDS,
+  mediaSlotKeys,
+  mediaSlots,
   loadBuiltinWorkflows,
   resolveWorkflow,
   supportedParams,
+  totalRefs,
   workflowsDir,
+  type MediaKind,
   type ParamKey,
   type Params,
+  type RefCounts,
   type Workflow,
   type WorkflowKind,
 } from "./workflows.js";
@@ -29,8 +34,25 @@ const ALIASES: Record<string, string> = {
   o: "out",
   h: "help",
   a: "async",
+  rv: "ref-video",
+  ra: "ref-audio",
 };
 const NUMBER_KEYS = new Set(["width", "height", "seed", "steps", "seconds", "fps", "timeout"]);
+
+const MEDIA_LABELS: Record<MediaKind, string> = { image: "图", video: "视频", audio: "音频" };
+const MEDIA_SHORT: Record<MediaKind, string> = { image: "img", video: "vid", audio: "aud" };
+const MEDIA_FLAGS: Record<MediaKind, string> = { image: "--ref", video: "--ref-video", audio: "--ref-audio" };
+
+/** --ref 按扩展名自动分流；不认识的扩展名当图片 */
+const VIDEO_EXTS = new Set(["mp4", "m4v", "mov", "webm", "mkv", "avi", "mpg", "mpeg"]);
+const AUDIO_EXTS = new Set(["mp3", "wav", "flac", "m4a", "aac", "ogg", "oga", "opus", "aiff", "aif", "wma"]);
+
+function inferMediaKind(file: string): MediaKind {
+  const ext = path.extname(file).slice(1).toLowerCase();
+  if (VIDEO_EXTS.has(ext)) return "video";
+  if (AUDIO_EXTS.has(ext)) return "audio";
+  return "image";
+}
 
 interface Options {
   command?: string;
@@ -38,8 +60,11 @@ interface Options {
   json?: boolean;
   help?: boolean;
   prompt?: string;
-  /** 参考图，可重复传（--ref a --ref b） */
+  /** 参考文件，可重复传（--ref a --ref b）；图片/视频/音频按扩展名自动分流 */
   refs?: string[];
+  /** 强制当视频/音频传 */
+  refVideos?: string[];
+  refAudios?: string[];
   negative?: string;
   workflow?: string;
   out?: string;
@@ -71,7 +96,9 @@ const HELP = `instafy — 调用 ComfyUI 生成图片 / 视频
 
 选项:
   -p, --prompt <文本>       提示词（也可直接放在命令后面）
-  -r, --ref <文件>          参考图 / 首帧图，本地文件会自动上传
+  -r, --ref <文件>          参考文件，可重复；图片/视频/音频按扩展名自动识别
+      --ref-video <文件>    参考视频（-rv），可重复
+      --ref-audio <文件>    参考音频（-ra），可重复
   -n, --negative <文本>     反向提示词
   -w, --workflow <名称|路径> 工作流名称、相对路径（wan/wan2_2_14B_t2v）或 JSON 路径
       --width <像素>        宽度        --height <像素>  高度
@@ -117,6 +144,7 @@ sync 选项:
   instafy image --ref ./me.jpg "换成东京夜景背景"
   instafy video --prompt "海边日落，镜头缓慢推进" --seconds 5
   instafy video --ref ./start.png "人物慢慢转头看向镜头"
+  instafy video -rv ./pose.mp4 -ra ./bgm.mp3 --ref ./first.png "镜头跟随人物"
   instafy video -p "海边日落" -a            # 提交即返回任务 id
   instafy status 3f1c0d2e                 # 查一次进度
   instafy status 3f1c0d2e --wait          # 轮询到底并下载结果
@@ -159,8 +187,10 @@ function parseArgs(argv: string[]): Options {
     const value = inlineValue ?? argv[++i];
     if (value === undefined) throw new UsageError(`--${name} 缺少取值`);
 
-    if (name === "ref") {
-      (opts.refs ??= []).push(value);
+    if (name === "ref" || name === "ref-video" || name === "ref-audio") {
+      if (name === "ref") (opts.refs ??= []).push(value);
+      else if (name === "ref-video") (opts.refVideos ??= []).push(value);
+      else (opts.refAudios ??= []).push(value);
       continue;
     }
 
@@ -200,17 +230,6 @@ async function uniqueTarget(dir: string, filename: string): Promise<string> {
 const PARAM_LABELS: Partial<Record<ParamKey, string>> = {
   prompt: "--prompt",
   negative: "--negative",
-  image: "--ref",
-  image1: "--ref",
-  image2: "--ref",
-  image3: "--ref",
-  image4: "--ref",
-  image5: "--ref",
-  image6: "--ref",
-  image7: "--ref",
-  image8: "--ref",
-  image9: "--ref",
-  image10: "--ref",
   width: "--width",
   height: "--height",
   seed: "--seed",
@@ -219,12 +238,18 @@ const PARAM_LABELS: Partial<Record<ParamKey, string>> = {
   fps: "--fps",
 };
 
+function paramLabel(key: ParamKey): string {
+  const media = /^(image|video|audio)\d+$/.exec(key) ?? (key === "image" ? [key, "image"] : null);
+  if (media) return MEDIA_FLAGS[media[1] as MediaKind];
+  return PARAM_LABELS[key] ?? `--${key}`;
+}
+
 function warnUnsupported(workflow: Workflow, params: Params): void {
   const supported = new Set(supportedParams(workflow));
   for (const [key, value] of Object.entries(params)) {
     if (value === undefined) continue;
     if (!supported.has(key as ParamKey)) {
-      log(`提示：工作流 ${workflow.name} 不支持 ${PARAM_LABELS[key as ParamKey] ?? key}，已忽略`);
+      log(`提示：工作流 ${workflow.name} 不支持 ${paramLabel(key as ParamKey)}，已忽略`);
     }
   }
 }
@@ -279,29 +304,55 @@ function describeQueue(state: QueueState): string {
 
 async function generate(kind: WorkflowKind | undefined, opts: Options, workflowSpec?: string): Promise<void> {
   const prompt = opts.prompt ?? opts.positional[0];
-  const refImages = opts.refs ?? [];
+  const provided: Record<MediaKind, string[]> = { image: [], video: [], audio: [] };
+  for (const file of opts.refs ?? []) provided[inferMediaKind(file)].push(file);
+  for (const file of opts.refVideos ?? []) provided.video.push(file);
+  for (const file of opts.refAudios ?? []) provided.audio.push(file);
+  const counts: RefCounts = {
+    image: provided.image.length,
+    video: provided.video.length,
+    audio: provided.audio.length,
+  };
+
   const config = loadConfig();
-  const workflow = resolveWorkflow(workflowSpec ?? opts.workflow, kind, refImages.length > 0, config.defaults, log);
+  const workflow = resolveWorkflow(workflowSpec ?? opts.workflow, kind, counts, config.defaults, log);
   const mode = kind ?? workflow.kind;
 
   if (kind && workflow.kind !== kind) {
     throw new UsageError(`工作流 ${workflow.name} 是 ${workflow.kind} 类型，不能用 ${kind} 模式跑`);
   }
-  const slots = imageSlots(workflow);
-  if (refImages.length > 0 && slots.length === 0) {
-    throw new UsageError(`工作流 ${workflow.name} 不支持参考图，去掉 --ref 再试`);
+
+  const slots = mediaSlots(workflow);
+  for (const media of MEDIA_KINDS) {
+    const given = provided[media].length;
+    const declared = slots[media].length;
+    if (given > 0 && declared === 0) {
+      throw new UsageError(`工作流 ${workflow.name} 不支持参考${MEDIA_LABELS[media]}（${MEDIA_FLAGS[media]}），换个工作流或去掉它`);
+    }
+    if (given > declared) {
+      throw new UsageError(
+        `工作流 ${workflow.name} 最多支持 ${declared} 个参考${MEDIA_LABELS[media]}，收到 ${given} 个`,
+      );
+    }
   }
-  if (slots.length > 0 && refImages.length === 0) {
+  // 某类没传就不填，槽位在提交前剪掉；一个参考文件都没传时才提示需要参考
+  const declared = MEDIA_KINDS.filter((media) => slots[media].length > 0);
+  if (totalRefs(counts) === 0 && declared.length > 0) {
+    const detail = declared.map((media) => `${MEDIA_FLAGS[media]}（${slots[media].length} 个槽位）`).join("、");
     throw new UsageError(
-      `工作流 ${workflow.name} 需要参考图（支持 ${slots.length} 张），请加 --ref <图片>` +
-        `；想跑纯文生视频可加 --workflow wan2_2_14B_t2v`,
+      `工作流 ${workflow.name} 需要参考文件，请加 ${detail}` +
+        (mode === "video" ? "；想跑纯文生视频可加 --workflow wan2_2_14B_t2v" : ""),
     );
   }
-  if (refImages.length > slots.length) {
-    throw new UsageError(`工作流 ${workflow.name} 最多支持 ${slots.length} 张参考图，收到 ${refImages.length} 张`);
+  for (const media of declared) {
+    if (provided[media].length === 0) {
+      log(`提示：没传参考${MEDIA_LABELS[media]}，工作流 ${workflow.name} 的 ${slots[media].length} 个槽位已剪掉`);
+    }
   }
-  if (!prompt && refImages.length === 0) {
-    throw new UsageError("请提供提示词（--prompt 或直接跟在命令后面），或用 --ref 提供参考图");
+  if (!prompt && totalRefs(counts) === 0) {
+    throw new UsageError(
+      "请提供提示词（--prompt 或直接跟在命令后面），或用 --ref / --ref-video / --ref-audio 提供参考文件",
+    );
   }
 
   // seed 不传时只在工作流支持 seed 的情况下随机生成；不支持就不塞，避免误报
@@ -321,17 +372,19 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
 
   const client = new ComfyClient(resolveBaseUrl(opts.url, process.env, config));
 
-  for (const [index, ref] of refImages.entries()) {
-    log(`上传参考图 ${ref} …`);
-    params[slots[index]] = await client.uploadImage(ref);
+  for (const media of MEDIA_KINDS) {
+    for (const [index, file] of provided[media].entries()) {
+      log(`上传参考${MEDIA_LABELS[media]} ${file} …`);
+      params[slots[media][index]] = await client.uploadMedia(file);
+    }
   }
 
   const graph = buildGraph(workflow, params);
-  // 没传的参考图槽位直接剪掉；被牵连缺必填输入的节点也一起清掉
-  const unusedSlots = slots.slice(refImages.length);
+  // 没传的槽位直接剪掉；被牵连缺必填输入的节点也一起清掉
+  const unusedSlots = MEDIA_KINDS.flatMap((media) => slots[media].slice(provided[media].length));
   if (unusedSlots.length > 0) {
     const info = await client.objectInfo();
-    dropImageSlots(graph, workflow, unusedSlots, (type) => Object.keys(info[type]?.input?.required ?? {}));
+    dropMediaSlots(graph, workflow, unusedSlots, (type) => Object.keys(info[type]?.input?.required ?? {}));
   }
   const promptId = await client.queue(graph);
   log(`已提交 ${workflow.name}，任务 ${promptId}${seed === undefined ? "" : `，种子 ${seed}`}`);
@@ -453,7 +506,10 @@ async function listWorkflows(): Promise<void> {
   const nameWidth = Math.max(16, ...names.map((name) => name.length));
   const paramOrder: ParamKey[] = ["negative", "width", "height", "seconds", "fps", "steps", "seed"];
 
-  process.stdout.write(`共 ${workflows.size} 个工作流（ref / ref×N = 需要的参考图张数，用 --ref 依次传入）\n`);
+  process.stdout.write(
+    `共 ${workflows.size} 个工作流（img / vid / aud = 参考图 / 视频 / 音频槽位数，` +
+      `用 --ref / --ref-video / --ref-audio 依次传入）\n`,
+  );
   for (const [group, list] of [...groups.entries()].sort((a, b) =>
     a[0] === "（根目录）" ? -1 : b[0] === "（根目录）" ? 1 : a[0].localeCompare(b[0]),
   )) {
@@ -461,9 +517,13 @@ async function listWorkflows(): Promise<void> {
     for (const workflow of list) {
       const params = paramOrder.filter((key) => workflow.bindings[key]);
       const flags = params.map((key) => `--${key}`).join(" ");
-      const slotCount = imageSlots(workflow).length;
-      const ref = slotCount === 0 ? "-" : slotCount === 1 ? "ref" : `ref×${slotCount}`;
-      const line = `  ${workflow.name.padEnd(nameWidth)}  ${workflow.kind.padEnd(6)}${ref.padEnd(8)}${flags}`;
+      const ref = MEDIA_KINDS.map((media) => {
+        const count = mediaSlotKeys(workflow, media).length;
+        return count === 0 ? "" : count === 1 ? MEDIA_SHORT[media] : `${MEDIA_SHORT[media]}×${count}`;
+      })
+        .filter(Boolean)
+        .join(" ");
+      const line = `  ${workflow.name.padEnd(nameWidth)}  ${workflow.kind.padEnd(6)}${(ref || "-").padEnd(16)}${flags}`;
       process.stdout.write(`${line.trimEnd()}\n`);
     }
   }

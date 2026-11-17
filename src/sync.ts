@@ -4,7 +4,15 @@ import path from "node:path";
 import { ComfyClient, type PromptGraph } from "./client.js";
 import { convertWorkflow, type NodeSchema } from "./convert.js";
 import { loadConfig, resolveBaseUrl, resolveWorkflowsDir } from "./config.js";
-import { type Binding, type ParamKey, type Workflow, type WorkflowKind } from "./workflows.js";
+import {
+  MEDIA_KINDS,
+  MEDIA_PARAMS,
+  type Binding,
+  type MediaKind,
+  type ParamKey,
+  type Workflow,
+  type WorkflowKind,
+} from "./workflows.js";
 
 const MANIFEST_FILE = ".instafy-sync.json";
 /** ComfyUI user/default 下的相对目录，对应 ~/ComfyUI/user/default/workflows */
@@ -92,21 +100,12 @@ interface Guess {
 /**
  * 参数通过节点标题声明：在 ComfyUI 里把节点 Title 设成 instafy:<参数>。
  * 一个节点可以同时承载多个参数（如采样器的 seed/steps），标题只需标主角色。
+ * 媒体槽位（image1..image10 / video1..video3 / audio1..audio3）的标题按参数名生成。
  */
-const PARAM_TITLES: Record<ParamKey, string> = {
+const TITLE_BY_PARAM: Partial<Record<ParamKey, string>> = {
   prompt: "instafy:prompt",
   negative: "instafy:negative",
   image: "instafy:image",
-  image1: "instafy:image1",
-  image2: "instafy:image2",
-  image3: "instafy:image3",
-  image4: "instafy:image4",
-  image5: "instafy:image5",
-  image6: "instafy:image6",
-  image7: "instafy:image7",
-  image8: "instafy:image8",
-  image9: "instafy:image9",
-  image10: "instafy:image10",
   width: "instafy:size",
   height: "instafy:size",
   seed: "instafy:seed",
@@ -116,21 +115,10 @@ const PARAM_TITLES: Record<ParamKey, string> = {
   output: "instafy:output",
 };
 
-/** 标了 instafy:<参数> 的节点上按顺序尝试的字段名（只读字面值，不跟连线）。 */
-const PARAM_FIELDS: Record<ParamKey, string[]> = {
+/** 标量参数在标题节点上按顺序尝试的字段名（只读字面值，不跟连线）。 */
+const PARAM_FIELDS: Partial<Record<ParamKey, string[]>> = {
   prompt: ["prompt", "text", "positive_prompt", "manual_prompt", "global_prompt", "value"],
   negative: ["negative_prompt", "negative", "text"],
-  image: ["image"],
-  image1: ["image"],
-  image2: ["image"],
-  image3: ["image"],
-  image4: ["image"],
-  image5: ["image"],
-  image6: ["image"],
-  image7: ["image"],
-  image8: ["image"],
-  image9: ["image"],
-  image10: ["image"],
   width: ["width"],
   height: ["height"],
   seed: ["seed", "noise_seed"],
@@ -139,6 +127,40 @@ const PARAM_FIELDS: Record<ParamKey, string[]> = {
   seconds: ["value", "seconds"],
   output: ["filename_prefix"],
 };
+
+/**
+ * 参考文件节点读取的字段名：LoadImage 用 image，LoadVideo 用 file，
+ * LoadAudio 用 audio；后两个兜底兼容 VideoHelperSuite 之类的自定义节点。
+ */
+const MEDIA_FIELDS: Record<MediaKind, string[]> = {
+  image: ["image", "file"],
+  video: ["file", "video", "filename"],
+  audio: ["audio", "file", "filename"],
+};
+
+const MEDIA_KEY = /^(image|video|audio)(\d+)$/;
+
+/** 载入媒体文件的节点类，用来提示"有节点但没打标题" */
+const MEDIA_LOAD_NODES: Record<MediaKind, string[]> = {
+  image: ["LoadImage", "LoadImageMask", "LoadImageOutput"],
+  video: ["LoadVideo", "VHS_LoadVideo", "VHS_LoadVideoPath"],
+  audio: ["LoadAudio", "VHS_LoadAudio", "VHS_LoadAudioUpload"],
+};
+
+function titleOfParam(param: ParamKey): string {
+  return TITLE_BY_PARAM[param] ?? `instafy:${param}`;
+}
+
+function mediaKindOf(param: ParamKey): MediaKind | undefined {
+  const match = MEDIA_KEY.exec(param);
+  return match ? (match[1] as MediaKind) : undefined;
+}
+
+function fieldsOf(param: ParamKey, fallback?: string[]): string[] {
+  const media = mediaKindOf(param);
+  if (media) return MEDIA_FIELDS[media];
+  return fallback ?? PARAM_FIELDS[param] ?? [];
+}
 
 /**
  * 一个节点只打一个标题（如采样器同时有 seed/steps），其余参数的字段从"别的标题节点"上找时，
@@ -156,22 +178,15 @@ const PARAM_FALLBACK_FIELDS: Partial<Record<ParamKey, string[]>> = {
 const BIND_PARAMS: ParamKey[] = [
   "prompt",
   "negative",
-  "image1",
-  "image2",
-  "image3",
-  "image4",
-  "image5",
-  "image6",
-  "image7",
-  "image8",
-  "image9",
-  "image10",
   "width",
   "height",
   "seed",
   "steps",
   "fps",
   "seconds",
+  ...MEDIA_PARAMS.image,
+  ...MEDIA_PARAMS.video,
+  ...MEDIA_PARAMS.audio,
 ];
 
 function titleOf(graph: PromptGraph, id: string): string {
@@ -213,13 +228,13 @@ function bindByTitles(graph: PromptGraph): Guess {
 
   const bind = (param: ParamKey): void => {
     // image1 兼容旧标题 instafy:image
-    const titles = param === "image1" ? [PARAM_TITLES.image1, PARAM_TITLES.image] : [PARAM_TITLES[param]];
+    const titles = param === "image1" ? [titleOfParam("image1"), TITLE_BY_PARAM.image!] : [titleOfParam(param)];
     const exact = titled.filter((id) => titles.includes(titleOf(graph, id)));
     const fallbackFields = PARAM_FALLBACK_FIELDS[param];
     const groups = fallbackFields ? [exact, titled.filter((id) => !titles.includes(titleOf(graph, id)))] : [exact];
     for (const group of groups) {
       for (const id of group) {
-        const fields = group === exact ? PARAM_FIELDS[param] : fallbackFields!;
+        const fields = group === exact ? fieldsOf(param) : fallbackFields!;
         for (const field of fields) {
           const value = graph[id].inputs[field];
           if (value === undefined || isLink(value)) continue;
@@ -232,7 +247,14 @@ function bindByTitles(graph: PromptGraph): Guess {
 
   for (const param of BIND_PARAMS) bind(param);
 
-  const required = BIND_PARAMS.filter((param) => !/^image[2-9]$|^image10$/.test(param));
+  // 多槽位工作流通常只接其中几路，2 号以后的缺失不算问题；video1/audio1 只在确实有该媒体标题时才要求
+  const hasKindTitle = (kind: MediaKind) => titled.some((id) => titleOf(graph, id).startsWith(`instafy:${kind}`));
+  const required = BIND_PARAMS.filter((param) => {
+    if (/^(image|video|audio)([2-9]|10)$/.test(param)) return false;
+    const slotOne = /^(video|audio)1$/.exec(param);
+    if (slotOne) return hasKindTitle(slotOne[1] as MediaKind);
+    return true;
+  });
   const missing = required.filter((param) => !bindings[param]);
   if (missing.length > 0) {
     warnings.push(
@@ -240,6 +262,22 @@ function bindByTitles(graph: PromptGraph): Guess {
         ? `未绑定 ${missing.join("/")}（需要时给对应节点加 instafy:* 标题）`
         : "没有声明任何 instafy:* 标题，所有参数不可用（在 ComfyUI 里给节点设置标题后重新 sync）",
     );
+  }
+
+  // 有视频/音频载入节点却没打标题时，命令行的 --ref-video / --ref-audio 没法用
+  for (const media of MEDIA_KINDS) {
+    if (MEDIA_PARAMS[media].some((param) => bindings[param])) continue;
+    const unlabeled = [...ids].filter(
+      (id) =>
+        MEDIA_LOAD_NODES[media].includes(graph[id].class_type) &&
+        !titleOf(graph, id).startsWith(`instafy:${media}`),
+    );
+    if (unlabeled.length > 0) {
+      warnings.push(
+        `有 ${unlabeled.length} 个${media === "image" ? "图片" : media === "video" ? "视频" : "音频"}载入节点没打 instafy:${media}1 标题，` +
+          `${media === "image" ? "--ref" : media === "video" ? "--ref-video" : "--ref-audio"} 用不了`,
+      );
+    }
   }
 
   return guess;

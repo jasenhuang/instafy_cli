@@ -6,6 +6,11 @@ import { loadConfig, resolveWorkflowsDir } from "./config.js";
 
 export type WorkflowKind = "image" | "video";
 
+/** 参考文件类型 */
+export type MediaKind = "image" | "video" | "audio";
+
+export const MEDIA_KINDS: MediaKind[] = ["image", "video", "audio"];
+
 /** [节点 id, 输入名] */
 export type Binding = [string, string];
 
@@ -20,21 +25,20 @@ export interface Workflow {
   graph: PromptGraph;
 }
 
+type SlotIndex = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
+
+/** 媒体槽位：图片最多 10 张，视频/音频各最多 3 个 */
+export type MediaParam =
+  | `image${SlotIndex}`
+  | `video${1 | 2 | 3}`
+  | `audio${1 | 2 | 3}`;
+
 export type ParamKey =
   | "prompt"
   | "negative"
   /** 旧格式兼容：等价于 image1 */
   | "image"
-  | "image1"
-  | "image2"
-  | "image3"
-  | "image4"
-  | "image5"
-  | "image6"
-  | "image7"
-  | "image8"
-  | "image9"
-  | "image10"
+  | MediaParam
   | "width"
   | "height"
   | "seed"
@@ -45,25 +49,49 @@ export type ParamKey =
 
 export type Params = Partial<Record<ParamKey, string | number | undefined>>;
 
-/** 参考图槽位，顺序即 --ref 的传参顺序 */
-export const IMAGE_PARAMS: ParamKey[] = [
-  "image1",
-  "image2",
-  "image3",
-  "image4",
-  "image5",
-  "image6",
-  "image7",
-  "image8",
-  "image9",
-  "image10",
-];
+const SLOT_INDEXES: Record<MediaKind, number[]> = {
+  image: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+  video: [1, 2, 3],
+  audio: [1, 2, 3],
+};
 
-/** 工作流声明的参考图槽位（旧的 image binding 视为单张） */
-export function imageSlots(workflow: Workflow): ParamKey[] {
-  const slots = IMAGE_PARAMS.filter((key) => workflow.bindings[key]);
-  if (slots.length === 0 && workflow.bindings.image) return ["image"];
+/** 各类媒体的槽位，顺序即对应 --ref / --ref-video / --ref-audio 的传参顺序 */
+export const MEDIA_PARAMS: Record<MediaKind, ParamKey[]> = {
+  image: SLOT_INDEXES.image.map((index) => `image${index}` as ParamKey),
+  video: SLOT_INDEXES.video.map((index) => `video${index}` as ParamKey),
+  audio: SLOT_INDEXES.audio.map((index) => `audio${index}` as ParamKey),
+};
+
+/** 工作流声明的某类参考槽位（旧的 image binding 视为单张参考图） */
+export function mediaSlotKeys(workflow: Workflow, kind: MediaKind): ParamKey[] {
+  const slots = MEDIA_PARAMS[kind].filter((key) => workflow.bindings[key]);
+  if (kind === "image" && slots.length === 0 && workflow.bindings.image) return ["image"];
   return slots;
+}
+
+export function mediaSlots(workflow: Workflow): Record<MediaKind, ParamKey[]> {
+  return {
+    image: mediaSlotKeys(workflow, "image"),
+    video: mediaSlotKeys(workflow, "video"),
+    audio: mediaSlotKeys(workflow, "audio"),
+  };
+}
+
+/** 已传入的参考文件数量 */
+export type RefCounts = Record<MediaKind, number>;
+
+export function totalRefs(counts: RefCounts): number {
+  return counts.image + counts.video + counts.audio;
+}
+
+/** 默认选择用：参考文件的种类和数量都匹配（缺某类的不自动选，避免剪掉槽位后跑不通） */
+export function acceptsRefs(workflow: Workflow, counts: RefCounts): boolean {
+  for (const kind of MEDIA_KINDS) {
+    const declared = mediaSlotKeys(workflow, kind).length;
+    if (counts[kind] > declared) return false;
+    if (declared > 0 && counts[kind] === 0) return false;
+  }
+  return true;
 }
 
 /** 随发布包内置的工作流目录（构建后指向项目根目录下的 workflows/） */
@@ -137,7 +165,7 @@ export function findWorkflow(spec: string): Workflow | undefined {
 export function resolveWorkflow(
   spec: string | undefined,
   kind: WorkflowKind | undefined,
-  hasRef: boolean,
+  refs: RefCounts,
   overrides?: DefaultWorkflowNames,
   warn?: (message: string) => void,
 ): Workflow {
@@ -154,7 +182,7 @@ export function resolveWorkflow(
 
   if (!kind) throw new Error("未指定模式，无法选择默认工作流");
 
-  return pickDefault(kind, hasRef, builtins, overrides, warn);
+  return pickDefault(kind, refs, builtins, overrides, warn);
 }
 
 export interface DefaultWorkflowNames {
@@ -174,31 +202,39 @@ const DEFAULT_PREFERENCES: Record<string, string[]> = {
 
 function pickDefault(
   kind: WorkflowKind,
-  hasRef: boolean,
+  refs: RefCounts,
   workflows: Map<string, Workflow>,
   overrides?: DefaultWorkflowNames,
   warn?: (message: string) => void,
 ): Workflow {
+  const hasRef = totalRefs(refs) > 0;
   const key = `${kind}:${hasRef ? "ref" : "plain"}`;
   const slot = (hasRef ? `${kind}Ref` : kind) as keyof DefaultWorkflowNames;
   const preferred = overrides?.[slot];
   if (preferred) {
     const workflow = workflows.get(preferred);
+    // 配置的默认工作流只要类型对就照常用，参考文件不合适会在提交前报错
     if (workflow && workflow.kind === kind) return workflow;
     warn?.(`配置的默认工作流 ${preferred} ${workflow ? "类型不对" : "不存在"}，改用内置默认`);
   }
 
   for (const name of DEFAULT_PREFERENCES[key] ?? []) {
     const workflow = workflows.get(name);
-    if (workflow && workflow.kind === kind) return workflow;
+    if (!workflow || workflow.kind !== kind) continue;
+    // 内置优先级里排前面的可能只接图片，传了视频/音频就跳过它
+    if (!hasRef || acceptsRefs(workflow, refs)) return workflow;
   }
+
   const fallback = [...workflows.values()]
-    .filter((workflow) => workflow.kind === kind && imageSlots(workflow).length > 0 === hasRef)
+    .filter((workflow) =>
+      workflow.kind === kind &&
+      (hasRef ? acceptsRefs(workflow, refs) : MEDIA_KINDS.every((k) => mediaSlotKeys(workflow, k).length === 0)),
+    )
     .sort((a, b) => a.name.localeCompare(b.name))[0];
   if (fallback) return fallback;
 
   throw new Error(
-    `没有可用的 ${kind} 工作流${hasRef ? "（需要参考图）" : ""}，请先运行 instafy sync，或用 --workflow 指定`,
+    `没有可用的 ${kind} 工作流${hasRef ? "（参考文件种类/数量要匹配）" : ""}，请先运行 instafy sync，或用 --workflow 指定`,
   );
 }
 
@@ -225,8 +261,8 @@ export function buildGraph(workflow: Workflow, params: Params): PromptGraph {
   return graph;
 }
 
-/** 没传参考图的槽位：删掉对应 LoadImage，并把因此缺少必填输入的节点一并清掉 */
-export function dropImageSlots(
+/** 没传参考文件的槽位：删掉对应的 LoadImage/LoadVideo/LoadAudio，并把因此缺少必填输入的节点一并清掉 */
+export function dropMediaSlots(
   graph: PromptGraph,
   workflow: Workflow,
   keys: ParamKey[],
