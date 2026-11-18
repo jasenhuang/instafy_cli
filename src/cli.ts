@@ -37,7 +37,7 @@ const ALIASES: Record<string, string> = {
   rv: "ref-video",
   ra: "ref-audio",
 };
-const NUMBER_KEYS = new Set(["width", "height", "seed", "steps", "seconds", "fps", "timeout"]);
+const NUMBER_KEYS = new Set(["width", "height", "seed", "steps", "cfg", "seconds", "fps", "timeout"]);
 
 const MEDIA_LABELS: Record<MediaKind, string> = { image: "图", video: "视频", audio: "音频" };
 const MEDIA_SHORT: Record<MediaKind, string> = { image: "img", video: "vid", audio: "aud" };
@@ -73,6 +73,7 @@ interface Options {
   height?: number;
   seed?: number;
   steps?: number;
+  cfg?: number;
   seconds?: number;
   fps?: number;
   timeout?: number;
@@ -104,6 +105,7 @@ const HELP = `instafy — 调用 ComfyUI 生成图片 / 视频
       --width <像素>        宽度        --height <像素>  高度
       --seed <整数>         随机种子（默认随机）
       --steps <整数>        采样步数
+      --cfg <数值>          CFG 强度
       --seconds <秒>        视频时长    --fps <帧率>     视频帧率
   -o, --out <目录>          输出目录（默认 ./outputs，可由配置指定）
       --timeout <秒>        等待上限（默认 1800，可由配置指定）
@@ -234,6 +236,7 @@ const PARAM_LABELS: Partial<Record<ParamKey, string>> = {
   height: "--height",
   seed: "--seed",
   steps: "--steps",
+  cfg: "--cfg",
   seconds: "--seconds",
   fps: "--fps",
 };
@@ -363,6 +366,7 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
     width: opts.width,
     height: opts.height,
     steps: opts.steps,
+    cfg: opts.cfg,
     seed,
     seconds: opts.seconds,
     fps: opts.fps,
@@ -504,7 +508,7 @@ async function listWorkflows(): Promise<void> {
 
   const names = [...workflows.values()].map((workflow) => workflow.name);
   const nameWidth = Math.max(16, ...names.map((name) => name.length));
-  const paramOrder: ParamKey[] = ["negative", "width", "height", "seconds", "fps", "steps", "seed"];
+  const paramOrder: ParamKey[] = ["negative", "width", "height", "seconds", "fps", "steps", "cfg", "seed"];
 
   process.stdout.write(
     `共 ${workflows.size} 个工作流（img / vid / aud = 参考图 / 视频 / 音频槽位数，` +

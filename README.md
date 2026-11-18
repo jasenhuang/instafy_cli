@@ -65,6 +65,7 @@ instafy status 3f1c0d2e --wait --json --timeout 600
 | `--width` / `--height` | 输出尺寸；视频要求 16 的倍数 |
 | `--seed` | 随机种子，默认随机并打印出来 |
 | `--steps` | 采样步数（图像工作流） |
+| `--cfg` | CFG 强度（工作流声明了 `instafy:cfg` 才生效） |
 | `--seconds` / `--fps` | 仅视频：时长与帧率，帧数 = seconds × fps + 1 |
 | `--timeout <秒>` | 等待上限，默认 1800（可配置） |
 | `--url <地址>` | ComfyUI 地址，默认 `http://127.0.0.1:8188`（可配置） |
@@ -109,8 +110,8 @@ instafy status 3f1c0d2e --wait --json --timeout 600
 
 | 场景 | 默认工作流 | 可调参数 |
 | --- | --- | --- |
-| 文生图 | `qwen_image_2_1_t2i` | `--negative --steps --seed` |
-| 改图（带 `--ref`） | `qwen_image_2_1_image_edit` | `--negative --width --height --steps --seed`（最多 10 张参考图） |
+| 文生图 | `qwen_image_2_1_t2i` | `--negative --steps --cfg --seed` |
+| 改图（带 `--ref`） | `qwen_image_2_1_image_edit` | `--negative --width --height --steps --cfg --seed`（最多 10 张参考图） |
 | 视频 | `minimax_h3_i2v`（需 `--ref`） | `--seconds --fps --steps --seed` |
 
 `minimax_h3_i2v` 需要参考图：不带 `--ref` 时 CLI 会直接提示“需要参考图”，不会退到 Wan。想在无参考图时跑纯文生视频，用 `--workflow wan2_2_14B_t2v`（或把 `defaults.video` 改成它）。想用 `minimax_h3_r2v`（参考图生视频）把 `defaults.videoRef` 改成 `"minimax_h3_r2v"`。
@@ -166,7 +167,8 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 | `instafy:audio1` … `instafy:audio3` | `LoadAudio` / `VHS_LoadAudio` | `audio` / `file` / `filename` |
 | `instafy:size` | `EmptyLatentImage` 之类 | `width` + `height` |
 | `instafy:seed` | 采样器 / `RandomNoise` | `seed` / `noise_seed` |
-| `instafy:steps` | 采样器 / `BasicScheduler` | `steps` |
+| `instafy:steps` | 采样器 / `BasicScheduler` / `PrimitiveInt` | `steps` / `value` |
+| `instafy:cfg` | `CFGGuider` / `PrimitiveFloat` | `cfg` / `value` |
 | `instafy:fps` | `CreateVideo` / `PrimitiveFloat` | `fps` / `frame_rate` / `value` |
 | `instafy:seconds` | 喂给时长数学节点的 `PrimitiveFloat` | `value` / `seconds` |
 
@@ -198,6 +200,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
     "height": ["节点id", "height"],
     "seed": ["KSampler节点id", "seed"],
     "steps": ["KSampler节点id", "steps"],
+    "cfg": ["KSampler节点id", "cfg"],
     "output": ["SaveImage节点id", "filename_prefix"]
   },
   "graph": { "节点id": { "class_type": "...", "inputs": { ... } } }
@@ -206,7 +209,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 
 - `bindings` 里出现 `image`/`image1`（或 `video1`、`audio1`）就会被视为“需要参考文件”，CLI 先上传到 `input/instafy/`，再把返回值写成 `instafy/<文件名>`。
 - 同步生成的文件，`bindings` 来自节点标题；手工写的 JSON 直接用 `bindings`，不需要标题（`instafy run/path` 不经过同步逻辑）。
-- `prompt` / `negative` / `width` / `height` / `seed` / `steps` / `seconds` / `fps` 只对声明了 binding 的参数生效，其余参数会提示“不支持，已忽略”。
+- `prompt` / `negative` / `width` / `height` / `seed` / `steps` / `cfg` / `seconds` / `fps` 只对声明了 binding 的参数生效，其余参数会提示“不支持，已忽略”。
 - `output` 会把保存节点的 `filename_prefix` 改成 `instafy/<工作流名>`，方便在远端输出目录里定位。
 - 图可以从 ComfyUI 网页端“导出（API 格式）”直接拿到 `graph` 部分；UI 格式的工作流用 `instafy sync` 同步即可（CLI 内置转换，会展开子图、跳过 mute/bypass 分支）。
 

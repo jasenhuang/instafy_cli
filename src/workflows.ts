@@ -43,6 +43,7 @@ export type ParamKey =
   | "height"
   | "seed"
   | "steps"
+  | "cfg"
   | "seconds"
   | "fps"
   | "output";
@@ -288,7 +289,11 @@ export function dropMediaSlots(
 
     for (const [id, other] of Object.entries(graph)) {
       if (doomed.has(id)) continue;
-      const missing = requiredFields(other.class_type).some((field) => other.inputs[field] === undefined);
+      const missing = requiredFields(other.class_type).some(
+        (field) =>
+          other.inputs[field] === undefined &&
+          !Object.keys(other.inputs).some((name) => name.startsWith(`${field}.`)),
+      );
       if (missing) {
         doomed.add(id);
         queue.push(id);

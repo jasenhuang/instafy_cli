@@ -15,6 +15,8 @@ import {
 } from "./workflows.js";
 
 const MANIFEST_FILE = ".instafy-sync.json";
+/** 绑定规则变化时递增：版本不一致时已跟踪的文件即使内容没变也重新转换 */
+const SYNC_VERSION = 3;
 /** ComfyUI user/default 下的相对目录，对应 ~/ComfyUI/user/default/workflows */
 const DEFAULT_DIR = "workflows";
 
@@ -110,6 +112,7 @@ const TITLE_BY_PARAM: Partial<Record<ParamKey, string>> = {
   height: "instafy:size",
   seed: "instafy:seed",
   steps: "instafy:steps",
+  cfg: "instafy:cfg",
   fps: "instafy:fps",
   seconds: "instafy:seconds",
   output: "instafy:output",
@@ -122,7 +125,8 @@ const PARAM_FIELDS: Partial<Record<ParamKey, string[]>> = {
   width: ["width"],
   height: ["height"],
   seed: ["seed", "noise_seed"],
-  steps: ["steps"],
+  steps: ["steps", "value"],
+  cfg: ["cfg", "value"],
   fps: ["fps", "frame_rate", "value"],
   seconds: ["value", "seconds"],
   output: ["filename_prefix"],
@@ -171,6 +175,7 @@ const PARAM_FALLBACK_FIELDS: Partial<Record<ParamKey, string[]>> = {
   negative: ["negative_prompt", "negative"],
   seed: ["seed", "noise_seed"],
   steps: ["steps"],
+  cfg: ["cfg"],
   fps: ["fps", "frame_rate"],
   seconds: ["seconds"],
 };
@@ -182,6 +187,7 @@ const BIND_PARAMS: ParamKey[] = [
   "height",
   "seed",
   "steps",
+  "cfg",
   "fps",
   "seconds",
   ...MEDIA_PARAMS.image,
@@ -400,6 +406,7 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
 
   const remotePaths = await client.listUserData(dir, true);
   const manifest = await readManifest(localDir);
+  const staleManifest = manifest.version !== SYNC_VERSION;
 
   const records: Array<{ rel: string; content: Buffer; sha1: string }> = [];
   for (const listed of remotePaths) {
@@ -419,7 +426,14 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
     const localFile = tracked ? path.join(localDir, tracked.file) : undefined;
     const exists = localFile ? await fileExists(localFile) : false;
 
-    if (tracked && exists && tracked.sha1 === record.sha1 && tracked.file === targetFile(record.rel) && !opts.force) {
+    if (
+      !staleManifest &&
+      tracked &&
+      exists &&
+      tracked.sha1 === record.sha1 &&
+      tracked.file === targetFile(record.rel) &&
+      !opts.force
+    ) {
       result.unchanged.push(record.rel);
     } else {
       pending.push(record);
@@ -494,6 +508,7 @@ export async function syncWorkflows(opts: SyncOptions = {}): Promise<SyncResult>
   result.added = result.added.filter((rel) => !failedRels.has(rel));
   result.updated = result.updated.filter((rel) => !failedRels.has(rel));
 
+  manifest.version = SYNC_VERSION;
   await writeManifest(localDir, manifest);
   return result;
 }
