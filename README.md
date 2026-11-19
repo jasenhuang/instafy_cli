@@ -100,7 +100,7 @@ instafy status 3f1c0d2e --wait --json --timeout 600
 | `timeout` | 等待上限（秒） | `1800` | `--timeout` |
 | `defaults` | 默认工作流，见下方 | 见「默认工作流」 | `--workflow` |
 
-`defaults` 的四个键对应四种场景：`image`（无 `--ref`）、`imageRef`（带 `--ref`）、`video`、`videoRef`。配置的名字不存在或类型不对（比如给 `video` 配了个 image 工作流），会在 stderr 提示一句然后退回内置默认；名字存在但需要参考图时照常选中，只是不带 `--ref` 会报“需要参考图”。
+`defaults` 的四个键对应四种场景：`image`（无 `--ref`）、`imageRef`（带 `--ref`）、`video`、`videoRef`。配置的名字不存在或类型不对（比如给 `video` 配了个 image 工作流），会在 stderr 提示一句然后退回内置默认；名字存在但需要参考图时照常选中；不带 `--ref` 时参考槽位会被剪掉直接跑，只有剪完连输出节点都没了才报错。
 
 规则：命令行 > 配置 > 默认。配置文件不存在就用全部默认值；JSON 不合法、字段类型不对或地址格式错误会直接报错，并在错误里带上配置文件路径，不会静默回退。
 
@@ -114,11 +114,11 @@ instafy status 3f1c0d2e --wait --json --timeout 600
 | 改图（带 `--ref`） | `qwen_image_2_1_image_edit` | `--negative --width --height --steps --cfg --seed`（最多 10 张参考图） |
 | 视频 | `minimax_h3_i2v`（需 `--ref`） | `--seconds --fps --steps --seed` |
 
-`minimax_h3_i2v` 需要参考图：不带 `--ref` 时 CLI 会直接提示“需要参考图”，不会退到 Wan。想在无参考图时跑纯文生视频，用 `--workflow wan2_2_14B_t2v`（或把 `defaults.video` 改成它）。想用 `minimax_h3_r2v`（参考图生视频）把 `defaults.videoRef` 改成 `"minimax_h3_r2v"`。
+`minimax_h3_i2v` 不带 `--ref` 时会剪掉参考槽，这类工作流剪完通常跑不通（会提示输出节点被牵连删除），不会退到 Wan。想在无参考图时跑纯文生视频，用 `--workflow wan2_2_14B_t2v`（或把 `defaults.video` 改成它）。想用 `minimax_h3_r2v`（参考图生视频）把 `defaults.videoRef` 改成 `"minimax_h3_r2v"`。
 
 这几个只是按名称优先挑的；远端改名/删除后会自动退到同类型（且参考文件种类/数量能对上的）里按名称排序的第一个。想固定用哪个就加 `--workflow`，或在 `~/.instafy.json` 的 `defaults` 里改。
 
-`instafy workflows` 的 `img` / `vid` / `aud` 列是工作流声明的参考槽位数（`×N` 表示多路）。没传的槽位在提交前直接剪掉（不会回退到工作流里的默认文件），某类一个都没传时 stderr 会提示一句；整份参考文件都没传才会报“需要参考文件”。图片最多 10 张，视频/音频各最多 3 个。比如 `minimax_h3_r2v` 显示 `img×9 aud×3`，可以只给一张图，音频槽位会被剪掉。
+`instafy workflows` 的 `img` / `vid` / `aud` 列是工作流声明的参考槽位数（`×N` 表示多路）。没传的槽位在提交前直接剪掉（不会回退到工作流里的默认文件），某类一个都没传时 stderr 会提示一句；整份参考文件都没传也允许提交：自动增长型输入组（qwen 文本编码节点的 `images.*`）缺省即 0 张参考图；剪掉参考槽后输出节点被牵连删除时才会报错。图片最多 10 张，视频/音频各最多 3 个。比如 `minimax_h3_r2v` 显示 `img×9 aud×3`，可以只给一张图，音频槽位会被剪掉。
 
 实测（A30 24G）：Qwen 文生图约 1.5 分钟，改图约 40 秒；Wan 2.2 的 2 秒 480×480 视频约 25 秒；MiniMax H3 的 2 秒视频约 6 分钟（模型很重，首次还要加载）。
 
@@ -207,7 +207,7 @@ instafy sync --prune        # 同时删除远端已不存在的工作流文件
 }
 ```
 
-- `bindings` 里出现 `image`/`image1`（或 `video1`、`audio1`）就会被视为“需要参考文件”，CLI 先上传到 `input/instafy/`，再把返回值写成 `instafy/<文件名>`。
+- `bindings` 里出现 `image`/`image1`（或 `video1`、`audio1`）就会被视为参考槽位，CLI 先上传到 `input/instafy/`，再把返回值写成 `instafy/<文件名>`。
 - 同步生成的文件，`bindings` 来自节点标题；手工写的 JSON 直接用 `bindings`，不需要标题（`instafy run/path` 不经过同步逻辑）。
 - `prompt` / `negative` / `width` / `height` / `seed` / `steps` / `cfg` / `seconds` / `fps` 只对声明了 binding 的参数生效，其余参数会提示“不支持，已忽略”。
 - `output` 会把保存节点的 `filename_prefix` 改成 `instafy/<工作流名>`，方便在远端输出目录里定位。

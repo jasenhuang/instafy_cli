@@ -338,15 +338,8 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
       );
     }
   }
-  // 某类没传就不填，槽位在提交前剪掉；一个参考文件都没传时才提示需要参考
+  // 某类没传就不填，槽位在提交前剪掉；一个参考文件都没传也允许——NoctQ*/qwen* 这类工作流有空图可跑
   const declared = MEDIA_KINDS.filter((media) => slots[media].length > 0);
-  if (totalRefs(counts) === 0 && declared.length > 0) {
-    const detail = declared.map((media) => `${MEDIA_FLAGS[media]}（${slots[media].length} 个槽位）`).join("、");
-    throw new UsageError(
-      `工作流 ${workflow.name} 需要参考文件，请加 ${detail}` +
-        (mode === "video" ? "；想跑纯文生视频可加 --workflow wan2_2_14B_t2v" : ""),
-    );
-  }
   for (const media of declared) {
     if (provided[media].length === 0) {
       log(`提示：没传参考${MEDIA_LABELS[media]}，工作流 ${workflow.name} 的 ${slots[media].length} 个槽位已剪掉`);
@@ -388,7 +381,17 @@ async function generate(kind: WorkflowKind | undefined, opts: Options, workflowS
   const unusedSlots = MEDIA_KINDS.flatMap((media) => slots[media].slice(provided[media].length));
   if (unusedSlots.length > 0) {
     const info = await client.objectInfo();
-    dropMediaSlots(graph, workflow, unusedSlots, (type) => Object.keys(info[type]?.input?.required ?? {}));
+    // 自动增长的输入组（如 TextEncodeQwenImage21 的 images.*）一个子输入都没有时，
+    // ComfyUI 视为「0 张参考图」而不是缺必填，所以不让它触发级联删除
+    const required = (type: string) =>
+      Object.entries(info[type]?.input?.required ?? {})
+        .filter(([, spec]) => !(Array.isArray(spec) && spec[0] === "COMFY_AUTOGROW_V3"))
+        .map(([name]) => name);
+    dropMediaSlots(graph, workflow, unusedSlots, required);
+    const outputNode = workflow.bindings.output?.[0];
+    if (outputNode && !graph[outputNode]) {
+      throw new UsageError(`工作流 ${workflow.name} 剪掉参考槽后跑不通（输出节点被牵连删除），请加参考文件`);
+    }
   }
   const promptId = await client.queue(graph);
   log(`已提交 ${workflow.name}，任务 ${promptId}${seed === undefined ? "" : `，种子 ${seed}`}`);
